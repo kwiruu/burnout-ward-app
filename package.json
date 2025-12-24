@@ -1,0 +1,21 @@
+{
+  "name": "code-red-er-shift",
+  "description": "A 2D top-down real-time ER management game built with Phaser 3",
+  "version": "0.1.0",
+  "author": "Your Name",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node log.js dev & vite --config vite/config.dev.mjs",
+    "build": "node log.js build & vite build --config vite/config.prod.mjs",
+    "dev-nolog": "vite --config vite/config.dev.mjs",
+    "build-nolog": "vite build --config vite/config.prod.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.7.2",
+    "vite": "^6.3.1"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0",
+    "terser": "^5.39.0"
+  }
+}
