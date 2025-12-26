@@ -6,6 +6,7 @@ import { Settings } from "./scenes/Settings";
 import { Game as MainGame } from "./scenes/Game";
 import { Pause } from "./scenes/Pause";
 import { GameOver } from "./scenes/GameOver";
+import { AnimationDebug } from "./scenes/AnimationDebug";
 import { AUTO, Game } from "phaser";
 import { GAME_CONFIG, UI_CONFIG } from "./utils/Constants";
 
@@ -32,6 +33,7 @@ const config: Phaser.Types.Core.GameConfig = {
     MainGame,
     Pause,
     GameOver,
+    AnimationDebug,
   ],
   physics: {
     default: "arcade",

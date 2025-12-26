@@ -7,9 +7,15 @@
 // GAME SETTINGS
 // ===========================================
 export const GAME_CONFIG = {
-  WIDTH: 1024,
+  WIDTH: 1506,
   HEIGHT: 768,
   TITLE: "Code Red: ER Shift",
+} as const;
+
+// Map padding (to center the map with margins)
+export const MAP_PADDING = {
+  TOP: 128,
+  BOTTOM: 128,
 } as const;
 
 // ===========================================
@@ -305,6 +311,7 @@ export const SCENES = {
   GAME: "Game",
   PAUSE: "Pause",
   GAME_OVER: "GameOver",
+  ANIMATION_DEBUG: "AnimationDebug",
 } as const;
 
 // ===========================================

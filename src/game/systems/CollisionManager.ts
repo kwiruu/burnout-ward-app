@@ -14,6 +14,13 @@ export interface CollisionRect {
   height: number;
 }
 
+export interface MapBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
 export interface CollisionResult {
   collides: boolean;
   collidedWith: string | null;
@@ -26,10 +33,27 @@ export class CollisionManager {
   private colliders: Map<string, CollisionRect> = new Map();
   private debugGraphics: Phaser.GameObjects.Graphics | null = null;
   private debugMode: boolean = false;
+  private mapBounds: MapBounds = MAP_BOUNDS; // Default to ERMapConfig bounds
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
     this.initializeColliders();
+  }
+
+  /**
+   * Set custom map bounds (use when map is offset/centered)
+   */
+  setMapBounds(bounds: MapBounds): void {
+    this.mapBounds = bounds;
+    if (this.debugMode) this.drawDebug();
+  }
+
+  /**
+   * Remove all existing colliders (useful when loading colliders from Tiled)
+   */
+  clearAll(): void {
+    this.colliders.clear();
+    if (this.debugMode) this.drawDebug();
   }
 
   /**
@@ -98,24 +122,24 @@ export class CollisionManager {
     let collides = false;
     let collidedWith: string | null = null;
 
-    // Check map bounds first
-    if (x - radius < MAP_BOUNDS.minX) {
-      correctedX = MAP_BOUNDS.minX + radius;
+    // Check map bounds first (use instance mapBounds, not static MAP_BOUNDS)
+    if (x - radius < this.mapBounds.minX) {
+      correctedX = this.mapBounds.minX + radius;
       collides = true;
       collidedWith = "bounds";
     }
-    if (x + radius > MAP_BOUNDS.maxX) {
-      correctedX = MAP_BOUNDS.maxX - radius;
+    if (x + radius > this.mapBounds.maxX) {
+      correctedX = this.mapBounds.maxX - radius;
       collides = true;
       collidedWith = "bounds";
     }
-    if (y - radius < MAP_BOUNDS.minY) {
-      correctedY = MAP_BOUNDS.minY + radius;
+    if (y - radius < this.mapBounds.minY) {
+      correctedY = this.mapBounds.minY + radius;
       collides = true;
       collidedWith = "bounds";
     }
-    if (y + radius > MAP_BOUNDS.maxY) {
-      correctedY = MAP_BOUNDS.maxY - radius;
+    if (y + radius > this.mapBounds.maxY) {
+      correctedY = this.mapBounds.maxY - radius;
       collides = true;
       collidedWith = "bounds";
     }
@@ -268,10 +292,10 @@ export class CollisionManager {
     // Draw bounds
     this.debugGraphics.lineStyle(2, 0x00ff00, 0.3);
     this.debugGraphics.strokeRect(
-      MAP_BOUNDS.minX,
-      MAP_BOUNDS.minY,
-      MAP_BOUNDS.maxX - MAP_BOUNDS.minX,
-      MAP_BOUNDS.maxY - MAP_BOUNDS.minY
+      this.mapBounds.minX,
+      this.mapBounds.minY,
+      this.mapBounds.maxX - this.mapBounds.minX,
+      this.mapBounds.maxY - this.mapBounds.minY
     );
   }
 

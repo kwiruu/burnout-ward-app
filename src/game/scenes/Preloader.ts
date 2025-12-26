@@ -1,5 +1,10 @@
 import { Scene } from "phaser";
 import { SCENES, UI_CONFIG, GAME_CONFIG } from "../utils/Constants";
+import {
+  SPRITES,
+  registerAnimations,
+  addCustomFramesToTexture,
+} from "../config/SpriteConfigs";
 
 /**
  * Preloader Scene
@@ -23,7 +28,7 @@ export class Preloader extends Scene {
 
     // Game title
     this.add
-      .text(centerX, centerY - 100, "CODE RED", {
+      .text(centerX, centerY - 100, "Title", {
         fontFamily: "Arial Black",
         fontSize: "64px",
         color: "#ff4757",
@@ -85,29 +90,97 @@ export class Preloader extends Scene {
   }
 
   preload(): void {
+    // Load map layer images (exported from Tiled as PNGs)
+    this.load.image("layer_bg", "src/resources/map01-layers/bg.png");
+    this.load.image(
+      "layer_floor_wall",
+      "src/resources/map01-layers/floor-wall.png"
+    );
+    this.load.image(
+      "layer_floor_objects_behind",
+      "src/resources/map01-layers/floor-objects-behind.png"
+    );
+    this.load.image(
+      "layer_floor_objects",
+      "src/resources/map01-layers/floor-objects.png"
+    );
+    this.load.image(
+      "layer_floor_wall2",
+      "src/resources/map01-layers/floor-wall2.png"
+    );
+    this.load.image(
+      "layer_above_player",
+      "src/resources/map01-layers/above-player.png"
+    );
+
+    // Load collision data (extracted from Tiled)
+    this.load.json("collision_data", "src/resources/collision.json");
+
+    // Load door spritesheets
+    this.load.spritesheet("door01", "src/resources/doors/door01.png", {
+      frameWidth: 64,
+      frameHeight: 128,
+    });
+    this.load.spritesheet("door02", "src/resources/doors/door02.png", {
+      frameWidth: 64,
+      frameHeight: 128,
+    });
+    this.load.spritesheet("door03", "src/resources/doors/door03.png", {
+      frameWidth: 64,
+      frameHeight: 128,
+    });
+
+    // Load chairs spritesheet
+    // 3 rows (yellow, green, red) x 6 columns (directions)
+    this.load.spritesheet("chairs", "src/resources/objects/chairs.png", {
+      frameWidth: 32,
+      frameHeight: 48,
+    });
+
+    // Load tablet sprite (32x64)
+    this.load.image("tablet", "src/resources/objects/tablet.png");
+
+    // Load UI icon spritesheets (32x32, 6 frames each)
+    this.load.spritesheet(
+      "ui_arrow_down",
+      "src/resources/ui_icons/arrow_down.png",
+      {
+        frameWidth: 32,
+        frameHeight: 32,
+      }
+    );
+    this.load.spritesheet("ui_e_key", "src/resources/ui_icons/e_key.png", {
+      frameWidth: 32,
+      frameHeight: 32,
+    });
+
+    // Load character sprites as images (not spritesheets)
+    // We'll add custom frames in create() to handle the 16px vertical gaps
+    Object.values(SPRITES).forEach((sprite) => {
+      this.load.image(sprite.key, sprite.path);
+    });
+
+    // Load placeholder assets from assets folder
     this.load.setPath("assets");
-
-    // ========================================
-    // PLACEHOLDER ASSETS
-    // For now, we'll create graphics programmatically
-    // Replace these with actual assets later
-    // ========================================
-
-    // We'll generate placeholder sprites in create()
-    // Once you have real assets, load them here like:
-    // this.load.image('player', 'sprites/player.png');
-    // this.load.spritesheet('player_walk', 'sprites/player_walk.png', { frameWidth: 32, frameHeight: 32 });
-    // this.load.audio('music_menu', 'audio/music/menu.mp3');
-    // this.load.tilemapTiledJSON('er_map', 'tilemaps/er_map.json');
-
-    // Simulate loading time for demo
-    // Remove this when you have real assets
     for (let i = 0; i < 100; i++) {
       this.load.image(`placeholder_${i}`, "logo.png");
     }
   }
 
   create(): void {
+    // Add custom frames to character textures (handles 16px vertical gaps)
+    Object.values(SPRITES).forEach((sprite) => {
+      addCustomFramesToTexture(this, sprite);
+    });
+
+    // Register all sprite animations
+    Object.values(SPRITES).forEach((sprite) => {
+      registerAnimations(this, sprite);
+    });
+
+    // Create UI icon animations
+    this.createUIAnimations();
+
     // Create placeholder textures
     this.createPlaceholderTextures();
 
@@ -173,5 +246,31 @@ export class Preloader extends Scene {
     bedOccupiedGraphics.destroy();
 
     console.log("✅ Placeholder textures created");
+  }
+
+  /**
+   * Create UI icon animations (arrow_down, e_key)
+   */
+  private createUIAnimations(): void {
+    // Arrow down animation (bouncing pointer)
+    this.anims.create({
+      key: "ui_arrow_down_anim",
+      frames: this.anims.generateFrameNumbers("ui_arrow_down", {
+        start: 0,
+        end: 5,
+      }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    // E key animation (press indicator)
+    this.anims.create({
+      key: "ui_e_key_anim",
+      frames: this.anims.generateFrameNumbers("ui_e_key", { start: 0, end: 5 }),
+      frameRate: 8,
+      repeat: -1,
+    });
+
+    console.log("✅ UI icon animations created");
   }
 }

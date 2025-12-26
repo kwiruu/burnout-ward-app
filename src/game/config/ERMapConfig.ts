@@ -315,7 +315,7 @@ export const SPAWN_POINTS: SpawnPoint[] = [
   { id: "patient_spawn", x: 60, y: 280, type: "patient" },
 
   // Player start position
-  { id: "player_spawn", x: 375, y: 125, type: "player" },
+  { id: "player_spawn", x: 64, y: 1160, type: "player" },
 
   // Staff spawn points
   { id: "nurse_spawn_1", x: 500, y: 350, type: "staff" },
@@ -335,10 +335,11 @@ export const DISCHARGE_POINT = {
 // MAP BOUNDS (playable area)
 // ===========================================
 export const MAP_BOUNDS = {
-  minX: 54,
-  maxX: 970,
-  minY: 54,
-  maxY: 446,
+  // Match Tiled map size 960x1312 (origin at 0,0)
+  minX: 0,
+  maxX: 960,
+  minY: 0,
+  maxY: 1312,
 };
 
 // ===========================================

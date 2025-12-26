@@ -5,17 +5,31 @@
  * Shows "Press E" prompts when near interactable objects.
  */
 
-import { PLAYER_CONFIG, UI_CONFIG } from "../utils/Constants";
+import { PLAYER_CONFIG } from "../utils/Constants";
 import EventBus from "../utils/EventBus";
 
 export interface Interactable {
   id: string;
   x: number;
   y: number;
-  type: "bed" | "equipment" | "patient" | "staff" | "furniture" | "door";
+  type:
+    | "bed"
+    | "equipment"
+    | "patient"
+    | "staff"
+    | "furniture"
+    | "door"
+    | "chair"
+    | "tablet";
   label?: string;
+  /** Optional dynamic label function - called each frame when prompt is visible */
+  getLabel?: () => string;
   canInteract: () => boolean;
   onInteract: () => void;
+  /** Optional: show pointer indicator when not in range (for tablets) */
+  showPointerWhenFar?: boolean;
+  /** Optional: custom Y offset for the prompt */
+  promptYOffset?: number;
 }
 
 export class InteractionManager {
@@ -23,8 +37,7 @@ export class InteractionManager {
   private interactables: Map<string, Interactable> = new Map();
   private currentTarget: Interactable | null = null;
   private promptContainer: Phaser.GameObjects.Container | null = null;
-  private promptText: Phaser.GameObjects.Text | null = null;
-  private promptBg: Phaser.GameObjects.Graphics | null = null;
+  private eKeySprite: Phaser.GameObjects.Sprite | null = null;
   private interactionKey: Phaser.Input.Keyboard.Key | null = null;
   private interactionRange: number = PLAYER_CONFIG.INTERACTION_RANGE;
 
@@ -35,27 +48,17 @@ export class InteractionManager {
   }
 
   /**
-   * Create the interaction prompt UI
+   * Create the interaction prompt UI with animated E key sprite
    */
   private createPromptUI(): void {
     this.promptContainer = this.scene.add.container(0, 0);
     this.promptContainer.setDepth(500);
     this.promptContainer.setVisible(false);
 
-    // Background
-    this.promptBg = this.scene.add.graphics();
-    this.promptContainer.add(this.promptBg);
-
-    // Text
-    this.promptText = this.scene.add.text(0, 0, "", {
-      fontFamily: "Arial Black",
-      fontSize: "14px",
-      color: "#ffffff",
-      stroke: "#000000",
-      strokeThickness: 3,
-    });
-    this.promptText.setOrigin(0.5);
-    this.promptContainer.add(this.promptText);
+    // E key sprite (animated)
+    this.eKeySprite = this.scene.add.sprite(0, 0, "ui_e_key", 0);
+    this.eKeySprite.setOrigin(0.5);
+    this.promptContainer.add(this.eKeySprite);
   }
 
   /**
@@ -137,36 +140,28 @@ export class InteractionManager {
 
     // Update prompt position if visible
     if (nearestTarget && this.promptContainer?.visible) {
-      this.promptContainer.setPosition(nearestTarget.x, nearestTarget.y - 50);
+      const yOffset = nearestTarget.promptYOffset ?? -40;
+      this.promptContainer.setPosition(
+        nearestTarget.x,
+        nearestTarget.y + yOffset
+      );
     }
   }
 
   /**
-   * Show interaction prompt
+   * Show interaction prompt with E key animation
    */
   private showPrompt(target: Interactable): void {
-    if (!this.promptContainer || !this.promptText || !this.promptBg) return;
+    if (!this.promptContainer || !this.eKeySprite) return;
 
-    // Set text based on target type
-    const actionText = this.getActionText(target);
-    const labelText = target.label || this.getDefaultLabel(target);
-    const fullText = `[E] ${actionText} ${labelText}`;
-
-    this.promptText.setText(fullText);
-
-    // Update background size
-    const padding = 10;
-    const width = this.promptText.width + padding * 2;
-    const height = this.promptText.height + padding * 2;
-
-    this.promptBg.clear();
-    this.promptBg.fillStyle(0x000000, 0.7);
-    this.promptBg.fillRoundedRect(-width / 2, -height / 2, width, height, 6);
-    this.promptBg.lineStyle(2, UI_CONFIG.COLORS.PRIMARY, 1);
-    this.promptBg.strokeRoundedRect(-width / 2, -height / 2, width, height, 6);
+    // Play E key animation
+    if (this.scene.anims.exists("ui_e_key_anim")) {
+      this.eKeySprite.play("ui_e_key_anim");
+    }
 
     // Position and show
-    this.promptContainer.setPosition(target.x, target.y - 50);
+    const yOffset = target.promptYOffset ?? -40;
+    this.promptContainer.setPosition(target.x, target.y + yOffset);
     this.promptContainer.setVisible(true);
 
     // Pop animation
@@ -197,6 +192,8 @@ export class InteractionManager {
       onComplete: () => {
         this.promptContainer?.setVisible(false);
         this.promptContainer?.setAlpha(1);
+        // Stop animation when hidden
+        this.eKeySprite?.stop();
       },
     });
 
@@ -213,50 +210,6 @@ export class InteractionManager {
     EventBus.emit("interaction:start", { target: this.currentTarget });
     this.currentTarget.onInteract();
     EventBus.emit("interaction:complete", { target: this.currentTarget });
-  }
-
-  /**
-   * Get action text based on target type
-   */
-  private getActionText(target: Interactable): string {
-    switch (target.type) {
-      case "bed":
-        return "Interact with";
-      case "equipment":
-        return "Use";
-      case "patient":
-        return "Attend to";
-      case "staff":
-        return "Talk to";
-      case "furniture":
-        return "Use";
-      case "door":
-        return "Open";
-      default:
-        return "Interact with";
-    }
-  }
-
-  /**
-   * Get default label based on target type
-   */
-  private getDefaultLabel(target: Interactable): string {
-    switch (target.type) {
-      case "bed":
-        return "Bed";
-      case "equipment":
-        return "Equipment";
-      case "patient":
-        return "Patient";
-      case "staff":
-        return "Staff";
-      case "furniture":
-        return "Object";
-      case "door":
-        return "Door";
-      default:
-        return "Object";
-    }
   }
 
   /**
@@ -290,6 +243,13 @@ export class InteractionManager {
    */
   setInteractionRange(range: number): void {
     this.interactionRange = range;
+  }
+
+  /**
+   * Get current interaction range
+   */
+  getInteractionRange(): number {
+    return this.interactionRange;
   }
 
   /**

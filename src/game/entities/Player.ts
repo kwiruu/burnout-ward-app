@@ -5,7 +5,9 @@
 
 import { PLAYER_CONFIG } from "../utils/Constants";
 import { CollisionManager } from "../systems/CollisionManager";
+import { SpriteSheetConfig, getSpriteConfig } from "../config/SpriteConfigs";
 import EventBus from "../utils/EventBus";
+import { Chair } from "./Chair";
 
 export type PlayerDirection = "down" | "up" | "left" | "right";
 
@@ -14,18 +16,23 @@ export interface PlayerConfig {
   x: number;
   y: number;
   collisionManager?: CollisionManager;
+  /** Sprite key from SpriteConfigs (default: "doctor01") */
+  spriteKey?: string;
 }
 
 export class Player extends Phaser.GameObjects.Container {
   private sprite: Phaser.GameObjects.Sprite;
-  private indicator: Phaser.GameObjects.Arc;
   private shadow: Phaser.GameObjects.Ellipse;
   private collisionManager: CollisionManager | null = null;
+  private spriteConfig: SpriteSheetConfig | null = null;
+  private currentAnimKey: string = "";
 
   // State
   private fatigue: number = 0;
   private isCarrying: boolean = false;
   private carryingEntity: Phaser.GameObjects.GameObject | null = null;
+  private isSitting: boolean = false;
+  private currentChair: Chair | null = null;
 
   // Movement
   private moveSpeed: number = PLAYER_CONFIG.SPEED;
@@ -34,8 +41,9 @@ export class Player extends Phaser.GameObjects.Container {
   private direction: PlayerDirection = "down";
   private isMoving: boolean = false;
 
-  // Collision
-  private hitboxRadius: number = 14;
+  // Collision (circle at feet)
+  private hitboxRadius: number = 15;
+  private hitboxOffsetY: number = 16; // Offset down to player's feet
 
   // Input
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -51,20 +59,24 @@ export class Player extends Phaser.GameObjects.Container {
 
     this.collisionManager = config.collisionManager || null;
 
+    // Get sprite configuration
+    const spriteKey = config.spriteKey || "doctor01";
+    this.spriteConfig = getSpriteConfig(spriteKey) || null;
+
     // Create shadow
-    this.shadow = config.scene.add.ellipse(0, 12, 24, 10, 0x000000, 0.3);
+    this.shadow = config.scene.add.ellipse(0, 24, 24, 10, 0x000000, 0.3);
     this.add(this.shadow);
 
-    // Create sprite
-    this.sprite = config.scene.add.sprite(0, 0, "player");
+    // Create sprite using spritesheet or fallback to placeholder
+    const textureKey = this.spriteConfig?.key || "player";
+    this.sprite = config.scene.add.sprite(0, 0, textureKey, 0);
     this.add(this.sprite);
-
-    // Create indicator above player
-    this.indicator = config.scene.add.circle(0, -24, 5, 0x16c79a);
-    this.add(this.indicator);
 
     // Setup input
     this.setupInput();
+
+    // Set depth so player appears above floor (0-50) but below top layers (150+)
+    this.setDepth(100);
 
     // Add to scene
     config.scene.add.existing(this);
@@ -96,16 +108,26 @@ export class Player extends Phaser.GameObjects.Container {
    * Create walking animations
    */
   private createAnimations(): void {
-    // For now, we'll simulate animations by scaling/tinting
-    // When you have real sprites, replace this with proper animation setup:
-    /*
-    this.scene.anims.create({
-      key: 'player_walk_down',
-      frames: this.scene.anims.generateFrameNumbers('player_spritesheet', { start: 0, end: 3 }),
-      frameRate: 8,
-      repeat: -1
-    });
-    */
+    // Animations are registered in Preloader from SpriteConfigs
+    // Just set the initial idle animation
+    if (this.spriteConfig) {
+      this.playAnimation("idle", this.direction);
+    }
+  }
+
+  /**
+   * Play animation for action and direction
+   */
+  private playAnimation(action: string, direction: PlayerDirection): void {
+    if (!this.spriteConfig) return;
+
+    const animKey = `${this.spriteConfig.key}_${action}_${direction}`;
+
+    // Only change animation if it's different
+    if (this.currentAnimKey !== animKey && this.scene.anims.exists(animKey)) {
+      this.sprite.play(animKey);
+      this.currentAnimKey = animKey;
+    }
   }
 
   /**
@@ -119,20 +141,24 @@ export class Player extends Phaser.GameObjects.Container {
     let newX = this.x + this.velocityX * (delta / 1000);
     let newY = this.y + this.velocityY * (delta / 1000);
 
-    // Check collision
+    // Check collision (at feet position)
     if (this.collisionManager) {
       const collision = this.collisionManager.checkCollision(
         newX,
-        newY,
+        newY + this.hitboxOffsetY, // Check at feet
         this.hitboxRadius
       );
       newX = collision.correctedX;
-      newY = collision.correctedY;
+      newY = collision.correctedY - this.hitboxOffsetY; // Adjust back
     }
 
     // Apply movement
     this.x = newX;
     this.y = newY;
+
+    // Update depth based on Y position (for proper rendering order)
+    // Objects lower on screen (higher Y) render on top
+    this.setDepth(80 + this.y * 0.1);
 
     // Update animations
     this.updateAnimations();
@@ -142,6 +168,14 @@ export class Player extends Phaser.GameObjects.Container {
    * Handle movement input
    */
   private handleInput(): void {
+    // Can't move while sitting
+    if (this.isSitting) {
+      this.velocityX = 0;
+      this.velocityY = 0;
+      this.isMoving = false;
+      return;
+    }
+
     let vx = 0;
     let vy = 0;
 
@@ -179,26 +213,33 @@ export class Player extends Phaser.GameObjects.Container {
    * Update animations based on state
    */
   private updateAnimations(): void {
-    if (this.isMoving) {
-      // Walking animation (simple bob effect until real sprites)
-      const bobAmount = Math.sin(this.scene.time.now / 100) * 2;
-      this.sprite.y = bobAmount;
+    // Don't override sit animation
+    if (this.isSitting) return;
 
-      // Shadow pulse
-      const shadowScale = 1 + Math.sin(this.scene.time.now / 100) * 0.05;
-      this.shadow.setScale(shadowScale, 1);
-
-      // Direction-based sprite flip
-      if (this.direction === "left") {
-        this.sprite.setFlipX(true);
-      } else if (this.direction === "right") {
-        this.sprite.setFlipX(false);
+    if (this.spriteConfig) {
+      // Use real spritesheet animations
+      if (this.isMoving) {
+        this.playAnimation("walk", this.direction);
+      } else {
+        this.playAnimation("idle", this.direction);
       }
     } else {
-      // Idle animation (gentle bob)
-      const idleBob = Math.sin(this.scene.time.now / 500) * 1;
-      this.sprite.y = idleBob;
-      this.shadow.setScale(1, 1);
+      // Fallback: placeholder animation (simple bob effect)
+      if (this.isMoving) {
+        const bobAmount = Math.sin(this.scene.time.now / 100) * 2;
+        this.sprite.y = bobAmount;
+        const shadowScale = 1 + Math.sin(this.scene.time.now / 100) * 0.05;
+        this.shadow.setScale(shadowScale, 1);
+        if (this.direction === "left") {
+          this.sprite.setFlipX(true);
+        } else if (this.direction === "right") {
+          this.sprite.setFlipX(false);
+        }
+      } else {
+        const idleBob = Math.sin(this.scene.time.now / 500) * 1;
+        this.sprite.y = idleBob;
+        this.shadow.setScale(1, 1);
+      }
     }
 
     // Fatigue visual effect
@@ -390,6 +431,75 @@ export class Player extends Phaser.GameObjects.Container {
     this.scene.time.delayedCall(duration, () => {
       this.sprite.clearTint();
     });
+  }
+
+  /**
+   * Sit in a chair
+   */
+  sitInChair(chair: Chair): boolean {
+    if (this.isSitting || chair.getIsOccupied()) return false;
+
+    // Mark chair as occupied
+    chair.setOccupied(true);
+    this.currentChair = chair;
+    this.isSitting = true;
+
+    // Position player at chair with offset
+    const offset = chair.getSitOffset();
+    this.x = chair.x + offset.x;
+    this.y = chair.y + offset.y;
+
+    // Get correct animation based on chair direction
+    const animAction = chair.getSitAnimationAction();
+    const animDirection = chair.getSitAnimationDirection();
+    this.playAnimation(animAction, animDirection as PlayerDirection);
+
+    // Set depth based on chair direction for proper rendering
+    this.setDepth(chair.getSitDepth());
+
+    // Stop any movement
+    this.velocityX = 0;
+    this.velocityY = 0;
+    this.isMoving = false;
+
+    EventBus.emit("player:sit", { chair });
+    return true;
+  }
+
+  /**
+   * Stand up from chair
+   */
+  standUp(): boolean {
+    if (!this.isSitting || !this.currentChair) return false;
+
+    // Free the chair
+    this.currentChair.setOccupied(false);
+    const chair = this.currentChair;
+    this.currentChair = null;
+    this.isSitting = false;
+
+    // Reset depth to normal
+    this.setDepth(80 + this.y * 0.1);
+
+    // Play idle animation in the direction we were sitting
+    this.playAnimation("idle", this.direction);
+
+    EventBus.emit("player:stand", { chair });
+    return true;
+  }
+
+  /**
+   * Check if player is sitting
+   */
+  getIsSitting(): boolean {
+    return this.isSitting;
+  }
+
+  /**
+   * Get current chair (if sitting)
+   */
+  getCurrentChair(): Chair | null {
+    return this.currentChair;
   }
 
   /**

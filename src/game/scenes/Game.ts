@@ -1,26 +1,31 @@
 import { Scene } from "phaser";
-import { SCENES, GAME_CONFIG } from "../utils/Constants";
+import { SCENES, GAME_CONFIG, MAP_PADDING } from "../utils/Constants";
 import { GameSceneData } from "../types";
 import EventBus from "../utils/EventBus";
 
 // Import new systems
-import { TileMapManager } from "../systems/TileMapManager";
+import { ImageMapLoader } from "../systems/ImageMapLoader";
 import { CollisionManager } from "../systems/CollisionManager";
-import {
-  InteractionManager,
-  Interactable,
-} from "../systems/InteractionManager";
+import { InteractionManager } from "../systems/InteractionManager";
 
 // Import entities
 import { Player } from "../entities/Player";
 import { Bed } from "../entities/Bed";
+import { Door } from "../entities/Door";
+import { Chair } from "../entities/Chair";
+import { Patient } from "../entities/Patient";
+import { Staff, StaffTask } from "../entities/Staff";
+import { Tablet } from "../entities/Tablet";
 
 // Import map config
 import {
-  BED_POSITIONS,
-  getSpawnPointByType,
-  getRoomAtPosition,
-} from "../config/ERMapConfig";
+  MapConfig,
+  DEFAULT_MAP,
+  getMapOffset,
+  getSpawnPoint,
+  getMapBounds,
+  UrgencyWeights,
+} from "../config/MapConfigs";
 
 /**
  * Main Game Scene
@@ -31,13 +36,23 @@ export class Game extends Scene {
   private sceneData!: GameSceneData;
 
   // Systems
-  private tileMapManager!: TileMapManager;
+  private imageMapLoader!: ImageMapLoader;
   private collisionManager!: CollisionManager;
   private interactionManager!: InteractionManager;
 
   // Game objects
   private player!: Player;
   private beds: Map<string, Bed> = new Map();
+  private doors: Door[] = [];
+  private chairs: Chair[] = [];
+  private patients: Patient[] = [];
+  private staffs: Staff[] = [];
+  private tablets: Tablet[] = [];
+
+  // Patient spawning
+  private currentSpawnRate: number = 0;
+  private patientSpawnTimer!: Phaser.Time.TimerEvent;
+  private patientIdCounter: number = 0;
 
   // Game state
   private shiftTimer: number = 0;
@@ -67,7 +82,7 @@ export class Game extends Scene {
   init(data: GameSceneData): void {
     this.sceneData = data || {
       difficulty: "NORMAL",
-      shiftDuration: 600, // 10 minutes default
+      shiftDuration: 300, // 5 minutes default
     };
     this.shiftTimer = this.sceneData.shiftDuration;
     this.chaosScore = 0;
@@ -81,23 +96,43 @@ export class Game extends Scene {
 
     // Clear collections
     this.beds.clear();
+    this.patients = [];
+    this.staffs = [];
+    this.tablets = [];
+    this.patientIdCounter = 0;
   }
 
   create(): void {
     // Background color
-    this.cameras.main.setBackgroundColor(0x1a1a2e);
+    this.cameras.main.setBackgroundColor(0x3a3a50);
 
     // Initialize systems
     this.initializeSystems();
 
-    // Create the ER map
-    this.tileMapManager.create();
+    // Load map layers (images) and collision
+    this.loadMapImages();
+    this.loadCollisionFromJson();
 
-    // Create beds
+    // Create beds (disabled until positions are mapped)
     this.createBeds();
+
+    // Create doors
+    this.createDoors();
+
+    // Create chairs
+    this.createChairs();
+
+    // Create staff
+    this.createStaffs();
+
+    // Create tablets
+    this.createTablets();
 
     // Create player
     this.createPlayer();
+
+    // Camera follow (vertical only)
+    this.setupCamera();
 
     // Create HUD
     this.createHUD();
@@ -109,6 +144,9 @@ export class Game extends Scene {
       callbackScope: this,
       loop: true,
     });
+
+    // Start patient spawning
+    this.startPatientSpawning();
 
     // Set up pause functionality
     this.setupPause();
@@ -128,12 +166,27 @@ export class Game extends Scene {
     // Update player
     this.player.update(delta);
 
-    // Update interaction manager with player position
+    // Update doors (check proximity to player for auto-open)
     const playerPos = this.player.getPosition();
+    this.doors.forEach((door) => door.update(playerPos.x, playerPos.y, delta));
+
+    // Update patients
+    this.patients.forEach((patient) => patient.update(delta));
+
+    // Update staff
+    this.staffs.forEach((staff) => staff.update(delta));
+
+    // Update tablets (for pointer indicator)
+    const interactionRange = this.interactionManager.getInteractionRange();
+    this.tablets.forEach((tablet) =>
+      tablet.update(playerPos.x, playerPos.y, interactionRange)
+    );
+
+    // Update interaction manager with player position
     this.interactionManager.update(playerPos.x, playerPos.y);
 
-    // Update room indicator
-    this.updateRoomIndicator(playerPos.x, playerPos.y);
+    // Update room indicator (static)
+    this.updateRoomIndicator();
 
     // Update HUD
     this.updateHUD();
@@ -143,57 +196,99 @@ export class Game extends Scene {
    * Initialize all game systems
    */
   private initializeSystems(): void {
-    // Tile map manager (renders the map)
-    this.tileMapManager = new TileMapManager(this);
+    // Image map loader (layers as images, collision from JSON)
+    this.imageMapLoader = new ImageMapLoader(this);
 
-    // Collision manager (handles wall/furniture collision)
+    // Collision manager (handles collision)
     this.collisionManager = new CollisionManager(this);
 
     // Interaction manager (handles E key interactions)
     this.interactionManager = new InteractionManager(this);
   }
 
+  // Map offset to center it horizontally
+  private mapOffsetX: number = 0;
+  private mapOffsetY: number = MAP_PADDING.TOP;
+  private currentMap: MapConfig = DEFAULT_MAP;
+
+  /**
+   * Load map layer images
+   */
+  private loadMapImages(): void {
+    // Calculate offset to center the map
+    const offset = getMapOffset(this.currentMap);
+    this.mapOffsetX = offset.x;
+    this.mapOffsetY = offset.y;
+
+    this.imageMapLoader.loadLayers(
+      this.currentMap.layers,
+      this.mapOffsetX,
+      this.mapOffsetY
+    );
+  }
+
+  /**
+   * Load collision objects from collision.json (simple format)
+   */
+  private loadCollisionFromJson(): void {
+    const collisionData = this.cache.json.get(this.currentMap.collisionKey);
+    if (!collisionData) {
+      console.error(`${this.currentMap.collisionKey} not found in cache`);
+      return;
+    }
+
+    // Clear any default colliders and set map bounds with offset
+    this.collisionManager.clearAll();
+    this.collisionManager.setMapBounds(getMapBounds(this.currentMap));
+
+    this.imageMapLoader.loadCollisionData(collisionData);
+    const collisionObjects = this.imageMapLoader.getCollisionObjects();
+
+    collisionObjects.forEach((obj, index) => {
+      const collisionRect = {
+        x: obj.x + this.mapOffsetX,
+        y: obj.y + this.mapOffsetY,
+        width: obj.width || 32,
+        height: obj.height || 32,
+      };
+
+      this.collisionManager.addCollider(`wall_${index}`, collisionRect);
+    });
+
+    console.log(`✅ Applied ${collisionObjects.length} collision objects`);
+  }
+
+  /**
+   * Camera follows player vertically (locks X)
+   */
+  private setupCamera(): void {
+    const cam = this.cameras.main;
+
+    // Camera bounds include padding
+    const totalHeight =
+      this.currentMap.height + MAP_PADDING.TOP + MAP_PADDING.BOTTOM;
+    cam.setBounds(0, 0, GAME_CONFIG.WIDTH, totalHeight);
+    cam.startFollow(this.player, false, 0, 0.2); // lerpX=0 locks horizontal, lerpY smooths vertical
+    cam.setFollowOffset(0, 0);
+  }
+
   /**
    * Create beds from config
    */
   private createBeds(): void {
-    BED_POSITIONS.forEach((bedPos) => {
-      const bed = new Bed({
-        scene: this,
-        x: bedPos.x,
-        y: bedPos.y,
-        number: bedPos.number,
-        id: bedPos.id,
-      });
-
-      // Add to collision manager
-      const collisionRect = bed.getCollisionRect();
-      this.collisionManager.addCollider(bedPos.id, collisionRect);
-
-      // Register with interaction manager
-      const interactable: Interactable = {
-        id: bedPos.id,
-        x: bedPos.x,
-        y: bedPos.y,
-        type: "bed",
-        label: `Bed ${bedPos.number}`,
-        canInteract: () => bed.canInteract(),
-        onInteract: () => this.handleBedInteraction(bed),
-      };
-      this.interactionManager.register(interactable);
-
-      this.beds.set(bedPos.id, bed);
-    });
+    // Disabled until bed positions are mapped in Tiled
+    this.beds.clear();
+    console.log("⚠️ Beds disabled - update BED_POSITIONS to match Tiled map");
   }
 
   /**
    * Create the player character
    */
   private createPlayer(): void {
-    // Get spawn point from config
-    const spawnPoint = getSpawnPointByType("player");
-    const startX = spawnPoint?.x || 375;
-    const startY = spawnPoint?.y || 125;
+    // Get spawn point from map config (already includes offset)
+    const spawn = getSpawnPoint(this.currentMap, "player");
+    const startX = spawn?.x || this.mapOffsetX + this.currentMap.width / 2;
+    const startY = spawn?.y || this.mapOffsetY + this.currentMap.height / 2;
 
     this.player = new Player({
       scene: this,
@@ -204,48 +299,333 @@ export class Game extends Scene {
   }
 
   /**
-   * Handle bed interaction
+   * Create doors
+   * Doors are now defined in MapConfigs.ts for each map
    */
-  private handleBedInteraction(bed: Bed): void {
+  private createDoors(): void {
+    const offset = getMapOffset(this.currentMap);
+
+    this.currentMap.doors.forEach((doorConfig) => {
+      const door = new Door({
+        scene: this,
+        x: doorConfig.x + offset.x,
+        y: doorConfig.y + offset.y,
+        spriteKey: doorConfig.spriteKey || "door01",
+        autoOpen: doorConfig.autoOpen ?? true,
+        triggerDistance: doorConfig.triggerDistance ?? 50,
+        doorType: doorConfig.doorType || "dual",
+        fixedDirection: doorConfig.fixedDirection || "down",
+      });
+      this.doors.push(door);
+    });
+
+    console.log(`✅ Created ${this.doors.length} doors`);
+  }
+
+  /**
+   * Create chairs
+   * Chairs are defined in MapConfigs.ts for each map
+   */
+  private createChairs(): void {
+    const offset = getMapOffset(this.currentMap);
+
+    this.currentMap.chairs.forEach((chairConfig, index) => {
+      const chair = new Chair({
+        scene: this,
+        x: chairConfig.x + offset.x,
+        y: chairConfig.y + offset.y,
+        color: chairConfig.color || "yellow",
+        direction: chairConfig.direction || "down",
+      });
+      this.chairs.push(chair);
+
+      // Register chair as interactable
+      const chairId = `chair_${index}`;
+      this.interactionManager.register({
+        id: chairId,
+        x: chair.x,
+        y: chair.y,
+        type: "chair",
+        getLabel: () => {
+          if (
+            this.player.getIsSitting() &&
+            this.player.getCurrentChair() === chair
+          ) {
+            return "";
+          }
+          return "";
+        },
+        canInteract: () => {
+          // Can interact if player is not sitting, or if already sitting in this chair
+          if (this.player.getIsSitting()) {
+            return this.player.getCurrentChair() === chair;
+          }
+          return !chair.getIsOccupied();
+        },
+        onInteract: () => {
+          if (this.player.getIsSitting()) {
+            // Stand up
+            this.player.standUp();
+          } else {
+            // Sit down
+            this.player.sitInChair(chair);
+          }
+        },
+      });
+    });
+
+    console.log(`✅ Created ${this.chairs.length} chairs`);
+  }
+
+  /**
+   * Create staff members
+   * Staff are defined in MapConfigs.ts for each map
+   */
+  private createStaffs(): void {
+    const offset = getMapOffset(this.currentMap);
+
+    this.currentMap.staffs.forEach((staffConfig) => {
+      const staff = new Staff({
+        scene: this,
+        x: staffConfig.x + offset.x,
+        y: staffConfig.y + offset.y,
+        id: staffConfig.id,
+        spriteKey: staffConfig.spriteKey,
+        name: staffConfig.name,
+      });
+
+      // Set spawn position with offset applied
+      staff.setSpawnPosition(
+        staffConfig.x + offset.x,
+        staffConfig.y + offset.y
+      );
+
+      this.staffs.push(staff);
+
+      // Start auto-task if defined
+      if (staffConfig.autoTask) {
+        // Apply offset to all walkTo positions in the task
+        const taskWithOffset: StaffTask = {
+          ...staffConfig.autoTask,
+          steps: staffConfig.autoTask.steps.map((step) => ({
+            ...step,
+            walkTo: step.walkTo
+              ? { x: step.walkTo.x + offset.x, y: step.walkTo.y + offset.y }
+              : undefined,
+          })),
+        };
+
+        // Delay the task start slightly so staff appears first
+        this.time.delayedCall(500, () => {
+          staff.startTask(taskWithOffset);
+        });
+      }
+    });
+
+    console.log(`✅ Created ${this.staffs.length} staff members`);
+  }
+
+  /**
+   * Create tablets
+   * Tablets are defined in MapConfigs.ts for each map
+   */
+  private createTablets(): void {
+    const offset = getMapOffset(this.currentMap);
+
+    // Check if tablets array exists (for backwards compatibility)
+    if (!this.currentMap.tablets) {
+      console.log("ℹ️ No tablets defined in map config");
+      return;
+    }
+
+    this.currentMap.tablets.forEach((tabletConfig) => {
+      const tablet = new Tablet({
+        scene: this,
+        x: tabletConfig.x + offset.x,
+        y: tabletConfig.y + offset.y,
+        id: tabletConfig.id,
+        spriteKey: tabletConfig.spriteKey,
+      });
+
+      // Set pointer range if specified
+      if (tabletConfig.pointerRange) {
+        tablet.setPointerRange(tabletConfig.pointerRange);
+      }
+
+      this.tablets.push(tablet);
+
+      // Register tablet as interactable
+      this.interactionManager.register({
+        id: tabletConfig.id,
+        x: tablet.x,
+        y: tablet.y,
+        type: "tablet",
+        promptYOffset: -70,
+        canInteract: () => true,
+        onInteract: () => {
+          console.log(`📱 Interacting with tablet: ${tabletConfig.id}`);
+          EventBus.emit("tablet:interact", { tabletId: tabletConfig.id });
+        },
+      });
+    });
+
+    console.log(`✅ Created ${this.tablets.length} tablets`);
+  }
+
+  /**
+   * Find an available (unoccupied) chair
+   */
+  private findAvailableChair(): Chair | null {
+    return this.chairs.find((chair) => !chair.getIsOccupied()) || null;
+  }
+
+  // ===========================================
+  // PATIENT SPAWNING SYSTEM
+  // ===========================================
+
+  /**
+   * Start the patient spawning timer
+   */
+  private startPatientSpawning(): void {
+    const gameConfig = this.currentMap.gameConfig;
+    this.currentSpawnRate = gameConfig.spawnRateMs;
+
+    // Schedule first spawn
+    this.scheduleNextPatientSpawn();
+
     console.log(
-      `Interacting with bed ${bed.getNumber()}, state: ${bed.getState()}`
+      `✅ Patient spawning started (rate: ${this.currentSpawnRate}ms)`
+    );
+  }
+
+  /**
+   * Schedule the next patient spawn
+   */
+  private scheduleNextPatientSpawn(): void {
+    if (this.patientSpawnTimer) {
+      this.patientSpawnTimer.destroy();
+    }
+
+    this.patientSpawnTimer = this.time.delayedCall(
+      this.currentSpawnRate,
+      this.spawnPatient,
+      [],
+      this
+    );
+  }
+
+  /**
+   * Spawn a new patient
+   */
+  private spawnPatient(): void {
+    const gameConfig = this.currentMap.gameConfig;
+    const offset = getMapOffset(this.currentMap);
+
+    // Check if we're at max patients
+    if (this.patients.length >= gameConfig.maxPatients) {
+      // Schedule next spawn anyway
+      this.scheduleNextPatientSpawn();
+      return;
+    }
+
+    // Generate random severity based on weights
+    const severity = this.getRandomSeverity(gameConfig.urgencyWeights);
+
+    // Create patient at spawn point
+    const spawnPoint = gameConfig.patientSpawn.spawnPoint;
+    const patientId = `patient_${this.patientIdCounter++}`;
+
+    const patient = new Patient({
+      scene: this,
+      x: spawnPoint.x + offset.x,
+      y: spawnPoint.y + offset.y,
+      severity: severity,
+      id: patientId,
+    });
+
+    this.patients.push(patient);
+    this.patientsArrived++;
+
+    // First walk to the waiting area walkToPoint
+    const walkTo = gameConfig.patientSpawn.walkToPoint;
+    const faceDir = gameConfig.patientSpawn.faceDirection;
+
+    patient.walkTo(walkTo.x + offset.x, walkTo.y + offset.y, () => {
+      // Face the configured direction after arriving
+      patient.setDirection(faceDir);
+
+      // Wait 3 seconds before trying to find a chair
+      this.time.delayedCall(3000, () => {
+        // Try to find an available chair
+        const availableChair = this.findAvailableChair();
+
+        if (availableChair) {
+          // Walk to chair and sit
+          patient.walkToChairAndSit(availableChair, () => {
+            patient.setCurrentState("WAITING");
+            console.log(`🪑 Patient ${patientId} seated in chair`);
+          });
+        } else {
+          // No chair available, just stay standing
+          patient.setCurrentState("WAITING");
+        }
+      });
+    });
+
+    console.log(`🚑 Patient ${patientId} spawned (severity: ${severity})`);
+
+    // Decrease spawn rate (make spawns faster over time)
+    this.currentSpawnRate = Math.max(
+      gameConfig.minSpawnRateMs,
+      this.currentSpawnRate - gameConfig.spawnRateDecreaseMs
     );
 
-    if (!bed.getIsWorking()) {
-      // Start repair
-      console.log("Repairing bed...");
-      bed.repair();
-      EventBus.emit("bed:repaired", { bedId: bed.getId() });
-      return;
-    }
-
-    if (bed.getNeedsAttention()) {
-      // Attend to patient
-      console.log("Attending to patient...");
-      bed.setNeedsAttention(false);
-      EventBus.emit("bed:attended", { bedId: bed.getId() });
-      return;
-    }
-
-    // General interaction - show bed info
-    EventBus.emit("bed:selected", {
-      bedId: bed.getId(),
-      number: bed.getNumber(),
-      state: bed.getState(),
-      patientId: bed.getPatientId(),
-    });
+    // Schedule next spawn
+    this.scheduleNextPatientSpawn();
   }
+
+  /**
+   * Get a random severity based on weights
+   */
+  private getRandomSeverity(weights: UrgencyWeights): number {
+    const totalWeight =
+      weights.severity1 +
+      weights.severity2 +
+      weights.severity3 +
+      weights.severity4 +
+      weights.severity5;
+
+    let random = Math.random() * totalWeight;
+
+    if (random < weights.severity1) return 1;
+    random -= weights.severity1;
+
+    if (random < weights.severity2) return 2;
+    random -= weights.severity2;
+
+    if (random < weights.severity3) return 3;
+    random -= weights.severity3;
+
+    if (random < weights.severity4) return 4;
+
+    return 5;
+  }
+
+  /**
+   * Remove a patient from the list (called when patient is destroyed)
+   */
+  removePatient(patientId: string): void {
+    this.patients = this.patients.filter((p) => p.getId() !== patientId);
+  }
+
+  // Bed interaction disabled while beds are disabled.
 
   /**
    * Update room indicator based on player position
    */
-  private updateRoomIndicator(x: number, y: number): void {
-    const room = getRoomAtPosition(x, y);
-    if (room) {
-      this.roomIndicator.setText(`${room.emoji} ${room.name}`);
-    } else {
-      this.roomIndicator.setText("📍 ER");
-    }
+  private updateRoomIndicator(): void {
+    // Static label; dynamic rooms disabled (old config doesn't match Tiled)
+    this.roomIndicator.setText("📍 ER");
   }
 
   /**
@@ -261,16 +641,19 @@ export class Game extends Scene {
       strokeThickness: 4,
     });
     this.timerText.setDepth(1000);
+    this.timerText.setScrollFactor(0);
 
     // Chaos bar background
     const chaosBarBg = this.add.graphics();
     chaosBarBg.fillStyle(0x222222, 1);
     chaosBarBg.fillRoundedRect(GAME_CONFIG.WIDTH / 2 - 150, 15, 300, 30, 8);
     chaosBarBg.setDepth(1000);
+    chaosBarBg.setScrollFactor(0);
 
     // Chaos bar fill
     this.chaosBar = this.add.graphics();
     this.chaosBar.setDepth(1001);
+    this.chaosBar.setScrollFactor(0);
     this.updateChaosBar();
 
     // Chaos label
@@ -281,7 +664,8 @@ export class Game extends Scene {
         color: "#888888",
       })
       .setOrigin(0.5)
-      .setDepth(1002);
+      .setDepth(1002)
+      .setScrollFactor(0);
 
     // Chaos percentage
     this.chaosText = this.add
@@ -291,7 +675,8 @@ export class Game extends Scene {
         color: "#ffffff",
       })
       .setOrigin(0.5)
-      .setDepth(1002);
+      .setDepth(1002)
+      .setScrollFactor(0);
 
     // Pause hint
     this.add
@@ -301,7 +686,8 @@ export class Game extends Scene {
         color: "#666666",
       })
       .setOrigin(1, 0)
-      .setDepth(1000);
+      .setDepth(1000)
+      .setScrollFactor(0);
 
     // Room indicator
     this.roomIndicator = this.add
@@ -311,7 +697,8 @@ export class Game extends Scene {
         color: "#888888",
       })
       .setOrigin(1, 0)
-      .setDepth(1000);
+      .setDepth(1000)
+      .setScrollFactor(0);
 
     // Bottom stats bar
     const hudY = GAME_CONFIG.HEIGHT - 80;
@@ -319,12 +706,13 @@ export class Game extends Scene {
     statsBarBg.fillStyle(0x1a1a2e, 0.9);
     statsBarBg.fillRect(0, hudY - 10, GAME_CONFIG.WIDTH, 90);
     statsBarBg.setDepth(999);
+    statsBarBg.setScrollFactor(0);
 
     this.statsText = this.add
       .text(
         GAME_CONFIG.WIDTH / 2,
         hudY + 20,
-        "👥 Waiting: 0  |  🛏️ Beds: 0/6  |  💀 Deaths: 0  |  ✅ Saved: 0",
+        "👥 Waiting: 0  |  🛏️ Beds: 0/0  |  💀 Deaths: 0  |  ✅ Saved: 0",
         {
           fontFamily: "Arial",
           fontSize: "20px",
@@ -332,7 +720,8 @@ export class Game extends Scene {
         }
       )
       .setOrigin(0.5)
-      .setDepth(1000);
+      .setDepth(1000)
+      .setScrollFactor(0);
   }
 
   /**
@@ -381,8 +770,9 @@ export class Game extends Scene {
     const occupiedBeds = Array.from(this.beds.values()).filter(
       (b) => b.getState() === "OCCUPIED"
     ).length;
+    const totalBeds = this.beds.size || 0;
     this.statsText.setText(
-      `👥 Waiting: 0  |  🛏️ Beds: ${occupiedBeds}/6  |  💀 Deaths: ${this.patientsDied}  |  ✅ Saved: ${this.patientsSaved}`
+      `👥 Waiting: 0  |  🛏️ Beds: ${occupiedBeds}/${totalBeds}  |  💀 Deaths: ${this.patientsDied}  |  ✅ Saved: ${this.patientsSaved}`
     );
   }
 
@@ -571,7 +961,7 @@ export class Game extends Scene {
    * Clean up on scene shutdown
    */
   shutdown(): void {
-    this.tileMapManager?.destroy();
+    this.imageMapLoader?.destroy();
     this.collisionManager?.destroy();
     this.interactionManager?.destroy();
     this.beds.clear();

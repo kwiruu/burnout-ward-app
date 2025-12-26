@@ -26,7 +26,7 @@ export class MainMenu extends Scene {
 
     // Game title
     const titleText = this.add
-      .text(centerX, 120, "CODE RED", {
+      .text(centerX, 120, "Title", {
         fontFamily: "Arial Black",
         fontSize: "72px",
         color: "#ff4757",
@@ -110,6 +110,21 @@ export class MainMenu extends Scene {
       },
     });
     this.buttons.push(settingsBtn);
+
+    // Debug button (small, bottom-right)
+    const debugBtn = new Button({
+      scene: this,
+      x: GAME_CONFIG.WIDTH - 80,
+      y: GAME_CONFIG.HEIGHT - 60,
+      text: "🎬 Anim Debug",
+      width: 140,
+      height: 35,
+      style: "secondary",
+      onClick: () => {
+        this.scene.start(SCENES.ANIMATION_DEBUG);
+      },
+    });
+    this.buttons.push(debugBtn);
 
     // Version number
     this.add

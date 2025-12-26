@@ -1,47 +1,115 @@
 /**
  * Staff Entity
- * Nurses and doctors that treat patients
+ * Staff members that perform tasks around the hospital
  */
 
-import { STAFF_CONFIG, EVENTS } from "../utils/Constants";
-import { StaffState, StaffType, StaffData } from "../types";
-import { emit } from "../utils/EventBus";
+import { SpriteSheetConfig, getSpriteConfig } from "../config/SpriteConfigs";
+import EventBus from "../utils/EventBus";
+
+// Available staff skins
+export const STAFF_SKINS = [
+  "staff01",
+  "staff02",
+  "staff03",
+  "staff04",
+  "staff05",
+  "staff06",
+  "staff07",
+  "staff08",
+];
+
+/**
+ * Get a random staff skin key
+ */
+export function getRandomStaffSkin(): string {
+  return STAFF_SKINS[Math.floor(Math.random() * STAFF_SKINS.length)];
+}
+
+export type StaffDirection = "down" | "up" | "left" | "right";
+
+/**
+ * A single step in a task
+ */
+export interface TaskStep {
+  /** Position to walk to (map coordinates, offset will be applied) */
+  walkTo?: { x: number; y: number };
+  /** How many milliseconds to wait at this step */
+  waitMs?: number;
+  /** Animation to play during wait (e.g., "idle", "read", "drink") */
+  animation?: string;
+  /** Direction to face during animation */
+  direction?: StaffDirection;
+  /** Optional depth override for manual layer control */
+  depth?: number;
+}
+
+/**
+ * A task is a sequence of steps
+ */
+export interface StaffTask {
+  /** Unique identifier for this task */
+  id: string;
+  /** Human-readable name */
+  name: string;
+  /** Steps to perform in order */
+  steps: TaskStep[];
+  /** Whether to loop the task (default: false, returns to spawn after) */
+  loop?: boolean;
+}
 
 export interface StaffConfig {
   scene: Phaser.Scene;
   x: number;
   y: number;
-  type: StaffType;
   id: string;
+  /** Optional specific skin, otherwise random */
+  spriteKey?: string;
+  /** Optional name tag */
   name?: string;
 }
 
 export class Staff extends Phaser.GameObjects.Container {
-  private sprite: Phaser.GameObjects.Arc;
-  private nameTag: Phaser.GameObjects.Text;
-  private fatigueBar: Phaser.GameObjects.Graphics;
+  private sprite: Phaser.GameObjects.Sprite;
+  private shadow: Phaser.GameObjects.Ellipse;
+  private nameTag: Phaser.GameObjects.Text | null = null;
+  private spriteConfig: SpriteSheetConfig | null = null;
+  private spriteKey: string;
+  private currentAnimKey: string = "";
+  private direction: StaffDirection = "down";
 
-  // Data
+  // Identity
   private staffId: string;
-  private staffType: StaffType;
   private staffName: string;
-  private currentState: StaffState;
-  private fatigue: number = 0;
-  private skill: number;
-  private assignedPatientId: string | null = null;
 
-  // Movement
-  private targetX: number | null = null;
-  private targetY: number | null = null;
+  // Spawn position (to return to)
+  private spawnX: number;
+  private spawnY: number;
+
+  // Walking
+  private walkTarget: { x: number; y: number } | null = null;
+  private walkSpeed: number = 80;
+  private onArriveCallback: (() => void) | null = null;
+
+  // Task system
+  private isPerformingTask: boolean = false;
+  private currentTask: StaffTask | null = null;
+  private currentStepIndex: number = 0;
+  private isWaiting: boolean = false;
+  private waitTimer: Phaser.Time.TimerEvent | null = null;
 
   constructor(config: StaffConfig) {
     super(config.scene, config.x, config.y);
 
     this.staffId = config.id;
-    this.staffType = config.type;
-    this.staffName = config.name || this.generateName();
-    this.currentState = "IDLE";
-    this.skill = STAFF_CONFIG.TYPES[config.type].skill;
+    this.staffName = config.name || "";
+    this.spawnX = config.x;
+    this.spawnY = config.y;
+
+    // Pick random skin or use provided one
+    this.spriteKey =
+      config.spriteKey ||
+      STAFF_SKINS[Math.floor(Math.random() * STAFF_SKINS.length)];
+    this.spriteConfig = getSpriteConfig(this.spriteKey) || null;
 
     // Create visual representation
     this.createVisuals();
@@ -49,279 +117,342 @@ export class Staff extends Phaser.GameObjects.Container {
     // Add to scene
     config.scene.add.existing(this as unknown as Phaser.GameObjects.GameObject);
 
-    // Start fatigue updates
-    config.scene.time.addEvent({
-      delay: 1000,
-      callback: this.updateFatigue,
-      callbackScope: this,
-      loop: true,
-    });
-  }
+    // Update depth based on Y position
+    this.updateDepth();
 
-  /**
-   * Generate a random staff name
-   */
-  private generateName(): string {
-    const nurseNames = ["Sarah", "Emily", "Maria", "Lisa", "Rachel", "Amy"];
-    const doctorNames = ["Dr. Smith", "Dr. Chen", "Dr. Patel", "Dr. Wilson"];
-
-    const names = this.staffType === "NURSE" ? nurseNames : doctorNames;
-    return names[Math.floor(Math.random() * names.length)];
+    // Play idle animation
+    this.playAnimation("idle", "down");
   }
 
   /**
    * Create staff visuals
    */
   private createVisuals(): void {
-    const typeConfig = STAFF_CONFIG.TYPES[this.staffType];
-    const color = typeConfig.color;
+    // Shadow under staff
+    this.shadow = this.scene.add.ellipse(0, 24, 24, 10, 0x000000, 0.3);
+    this.add(this.shadow);
 
-    // Fatigue bar
-    this.fatigueBar = this.scene.add.graphics();
-    this.add(this.fatigueBar);
-
-    // Main sprite (circle for now)
-    this.sprite = this.scene.add.circle(0, 0, 14, color);
-    this.sprite.setStrokeStyle(2, 0xffffff);
+    // Main sprite
+    const textureKey = this.spriteConfig?.key || "staff01";
+    this.sprite = this.scene.add.sprite(0, 0, textureKey, 0);
     this.add(this.sprite);
 
-    // Type indicator (N for nurse, D for doctor)
-    const typeLabel = this.scene.add
-      .text(0, 0, this.staffType === "NURSE" ? "N" : "D", {
-        fontFamily: "Arial Black",
-        fontSize: "12px",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5);
-    this.add(typeLabel);
-
-    // Name tag
-    this.nameTag = this.scene.add
-      .text(0, 22, this.staffName, {
-        fontFamily: "Arial",
-        fontSize: "10px",
-        color: "#888888",
-      })
-      .setOrigin(0.5);
-    this.add(this.nameTag);
-
-    this.updateFatigueBar();
-  }
-
-  /**
-   * Update fatigue bar visual
-   */
-  private updateFatigueBar(): void {
-    this.fatigueBar.clear();
-
-    if (this.fatigue > 20) {
-      const percentage = this.fatigue / STAFF_CONFIG.FATIGUE.MAX;
-      const barWidth = 24 * percentage;
-
-      // Background
-      this.fatigueBar.fillStyle(0x333333, 0.8);
-      this.fatigueBar.fillRect(-12, -26, 24, 4);
-
-      // Fill - color based on fatigue level
-      let color = 0x4ade80; // Green
-      if (this.fatigue > 50) color = 0xfbbf24; // Yellow
-      if (this.fatigue > 80) color = 0xef4444; // Red
-
-      this.fatigueBar.fillStyle(color, 1);
-      this.fatigueBar.fillRect(-12, -26, barWidth, 4);
+    // Name tag (optional)
+    if (this.staffName) {
+      this.nameTag = this.scene.add
+        .text(0, -30, this.staffName, {
+          fontFamily: "Arial",
+          fontSize: "10px",
+          color: "#ffffff",
+          stroke: "#000000",
+          strokeThickness: 2,
+        })
+        .setOrigin(0.5);
+      this.add(this.nameTag);
     }
   }
 
   /**
-   * Update fatigue each second
+   * Update depth based on Y position (for proper rendering order)
    */
-  private updateFatigue(): void {
-    const rate =
-      this.currentState === "TREATING"
-        ? STAFF_CONFIG.FATIGUE.WORK_RATE
-        : STAFF_CONFIG.FATIGUE.IDLE_RATE;
+  updateDepth(): void {
+    this.setDepth(80 + this.y * 0.1);
+  }
 
-    if (this.currentState === "RESTING") {
-      // Recover in break room
-      this.fatigue = Math.max(
-        0,
-        this.fatigue - STAFF_CONFIG.FATIGUE.RECOVERY_RATE
-      );
+  /**
+   * Play animation
+   */
+  playAnimation(action: string, direction: StaffDirection): void {
+    if (!this.spriteConfig || !this.sprite) return;
 
-      // Return to IDLE when recovered
-      if (this.fatigue < 30) {
-        this.currentState = "IDLE";
-        emit(EVENTS.STAFF_RECOVERED, { staffId: this.staffId });
-      }
+    const animKey = `${this.spriteKey}_${action}_${direction}`;
+
+    // Don't restart if already playing
+    if (this.currentAnimKey === animKey) return;
+
+    // Check if animation exists before playing
+    if (this.scene.anims.exists(animKey)) {
+      this.sprite.play(animKey);
+      this.currentAnimKey = animKey;
+      this.direction = direction;
     } else {
-      // Increase fatigue
-      this.fatigue = Math.min(STAFF_CONFIG.FATIGUE.MAX, this.fatigue + rate);
-
-      // Check for exhaustion
-      if (
-        this.fatigue >= STAFF_CONFIG.FATIGUE.EXHAUSTED_THRESHOLD &&
-        this.currentState !== "EXHAUSTED"
-      ) {
-        this.becomeExhausted();
+      // Try without direction (for animations like "sleep", "drink", "read")
+      const noDirectionKey = `${this.spriteKey}_${action}`;
+      if (this.scene.anims.exists(noDirectionKey)) {
+        this.sprite.play(noDirectionKey);
+        this.currentAnimKey = noDirectionKey;
+      } else {
+        // Fallback to idle
+        this.sprite.setFrame(0);
+        console.warn(`Animation ${animKey} not found`);
       }
     }
-
-    this.updateFatigueBar();
   }
 
   /**
-   * Become exhausted
+   * Set direction (for facing)
    */
-  private becomeExhausted(): void {
-    this.currentState = "EXHAUSTED";
-
-    // Visual indicator
-    this.sprite.setAlpha(0.6);
-
-    emit(EVENTS.STAFF_EXHAUSTED, {
-      staffId: this.staffId,
-    });
+  setDirection(direction: StaffDirection): void {
+    this.direction = direction;
+    this.playAnimation("idle", direction);
   }
 
   /**
-   * Assign to a patient
+   * Walk to a target position
    */
-  assignToPatient(patientId: string, patientX: number, patientY: number): void {
-    if (this.currentState === "EXHAUSTED" || this.currentState === "RESTING")
-      return;
+  walkTo(x: number, y: number, onArrive?: () => void): void {
+    this.walkTarget = { x, y };
+    this.onArriveCallback = onArrive || null;
 
-    this.assignedPatientId = patientId;
-    this.currentState = "MOVING_TO_PATIENT";
-    this.targetX = patientX;
-    this.targetY = patientY;
+    // Determine walking direction based on target
+    const dx = x - this.x;
+    const dy = y - this.y;
 
-    emit(EVENTS.STAFF_ASSIGNED, {
-      staffId: this.staffId,
-      patientId,
-    });
+    if (Math.abs(dx) > Math.abs(dy)) {
+      this.direction = dx > 0 ? "right" : "left";
+    } else {
+      this.direction = dy > 0 ? "down" : "up";
+    }
+
+    this.playAnimation("walk", this.direction);
   }
 
   /**
-   * Update movement towards target
+   * Update staff (call each frame)
    */
   update(delta: number): void {
-    if (this.targetX === null || this.targetY === null) return;
+    if (!this.walkTarget) return;
 
-    const speed =
-      this.currentState === "EXHAUSTED"
-        ? STAFF_CONFIG.SPEED * 0.5
-        : STAFF_CONFIG.SPEED;
+    const dx = this.walkTarget.x - this.x;
+    const dy = this.walkTarget.y - this.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
 
-    const distance = Phaser.Math.Distance.Between(
-      this.x,
-      this.y,
-      this.targetX,
-      this.targetY
-    );
-
-    if (distance < 5) {
+    if (distance < 2) {
       // Arrived at target
-      this.x = this.targetX;
-      this.y = this.targetY;
-      this.targetX = null;
-      this.targetY = null;
-      this.onArrived();
+      this.x = this.walkTarget.x;
+      this.y = this.walkTarget.y;
+      this.walkTarget = null;
+
+      // Play idle animation
+      this.playAnimation("idle", this.direction);
+
+      // Update depth
+      this.updateDepth();
+
+      // Call arrive callback
+      if (this.onArriveCallback) {
+        this.onArriveCallback();
+        this.onArriveCallback = null;
+      }
     } else {
       // Move towards target
-      const angle = Phaser.Math.Angle.Between(
-        this.x,
-        this.y,
-        this.targetX,
-        this.targetY
-      );
-      this.x += Math.cos(angle) * speed * (delta / 1000);
-      this.y += Math.sin(angle) * speed * (delta / 1000);
+      const moveSpeed = this.walkSpeed * (delta / 1000);
+      const ratio = moveSpeed / distance;
+
+      this.x += dx * ratio;
+      this.y += dy * ratio;
+
+      // Update direction based on movement
+      if (Math.abs(dx) > Math.abs(dy)) {
+        const newDir = dx > 0 ? "right" : "left";
+        if (this.direction !== newDir) {
+          this.direction = newDir;
+          this.playAnimation("walk", this.direction);
+        }
+      } else {
+        const newDir = dy > 0 ? "down" : "up";
+        if (this.direction !== newDir) {
+          this.direction = newDir;
+          this.playAnimation("walk", this.direction);
+        }
+      }
+
+      // Update depth while walking
+      this.updateDepth();
     }
   }
 
   /**
-   * Called when arrived at target
+   * Check if staff is currently walking
    */
-  private onArrived(): void {
-    if (this.currentState === "MOVING_TO_PATIENT") {
-      this.startTreating();
+  isWalking(): boolean {
+    return this.walkTarget !== null;
+  }
+
+  // ===========================================
+  // TASK SYSTEM
+  // ===========================================
+
+  /**
+   * Start performing a task
+   */
+  startTask(task: StaffTask): void {
+    if (this.isPerformingTask) {
+      console.warn(`Staff ${this.staffId} is already performing a task`);
+      return;
+    }
+
+    this.isPerformingTask = true;
+    this.currentTask = task;
+    this.currentStepIndex = 0;
+
+    console.log(`👷 Staff ${this.staffId} starting task: ${task.name}`);
+    EventBus.emit("staff:task_started", { staffId: this.staffId, task });
+
+    this.executeCurrentStep();
+  }
+
+  /**
+   * Stop the current task and return to spawn
+   */
+  stopTask(): void {
+    if (!this.isPerformingTask) return;
+
+    // Clear wait timer if any
+    if (this.waitTimer) {
+      this.waitTimer.destroy();
+      this.waitTimer = null;
+    }
+
+    this.isPerformingTask = false;
+    this.isWaiting = false;
+    this.currentTask = null;
+    this.currentStepIndex = 0;
+
+    // Return to spawn position
+    this.returnToSpawn();
+
+    EventBus.emit("staff:task_stopped", { staffId: this.staffId });
+  }
+
+  /**
+   * Execute the current step of the task
+   */
+  private executeCurrentStep(): void {
+    if (
+      !this.currentTask ||
+      this.currentStepIndex >= this.currentTask.steps.length
+    ) {
+      // Task completed
+      this.onTaskComplete();
+      return;
+    }
+
+    const step = this.currentTask.steps[this.currentStepIndex];
+
+    // If step has a walkTo, walk there first
+    if (step.walkTo) {
+      this.walkTo(step.walkTo.x, step.walkTo.y, () => {
+        this.executeStepAction(step);
+      });
+    } else {
+      // No walking needed, execute action immediately
+      this.executeStepAction(step);
     }
   }
 
   /**
-   * Start treating assigned patient
+   * Execute the action part of a step (wait, animation)
    */
-  private startTreating(): void {
-    this.currentState = "TREATING";
+  private executeStepAction(step: TaskStep): void {
+    // Set direction if specified
+    if (step.direction) {
+      this.direction = step.direction;
+    }
 
-    emit(EVENTS.STAFF_STARTED_TREATMENT, {
-      staffId: this.staffId,
-      patientId: this.assignedPatientId,
+    // Apply custom depth if specified
+    if (step.depth !== undefined) {
+      this.setDepth(step.depth);
+    } else {
+      // Otherwise use normal depth calculation
+      this.updateDepth();
+    }
+
+    // Play animation if specified
+    if (step.animation) {
+      this.playAnimation(step.animation, this.direction);
+    }
+
+    // Wait if specified
+    if (step.waitMs && step.waitMs > 0) {
+      this.isWaiting = true;
+      this.waitTimer = this.scene.time.delayedCall(step.waitMs, () => {
+        this.isWaiting = false;
+        this.waitTimer = null;
+        this.advanceToNextStep();
+      });
+    } else {
+      // No wait, advance immediately
+      this.advanceToNextStep();
+    }
+  }
+
+  /**
+   * Advance to the next step
+   */
+  private advanceToNextStep(): void {
+    this.currentStepIndex++;
+    this.executeCurrentStep();
+  }
+
+  /**
+   * Called when task is complete
+   */
+  private onTaskComplete(): void {
+    const task = this.currentTask;
+
+    if (task?.loop) {
+      // Loop the task
+      this.currentStepIndex = 0;
+      console.log(`🔄 Staff ${this.staffId} looping task: ${task.name}`);
+      this.executeCurrentStep();
+    } else {
+      // Return to spawn
+      console.log(`✅ Staff ${this.staffId} completed task: ${task?.name}`);
+      EventBus.emit("staff:task_completed", { staffId: this.staffId, task });
+
+      this.isPerformingTask = false;
+      this.currentTask = null;
+      this.currentStepIndex = 0;
+
+      this.returnToSpawn();
+    }
+  }
+
+  /**
+   * Return to spawn position
+   */
+  returnToSpawn(): void {
+    this.walkTo(this.spawnX, this.spawnY, () => {
+      this.playAnimation("idle", "down");
+      EventBus.emit("staff:returned_to_spawn", { staffId: this.staffId });
     });
   }
 
   /**
-   * Finish treating
+   * Check if staff is performing a task
    */
-  finishTreating(): void {
-    this.currentState = "IDLE";
-    this.assignedPatientId = null;
-
-    emit(EVENTS.STAFF_FINISHED_TREATMENT, {
-      staffId: this.staffId,
-    });
+  getIsPerformingTask(): boolean {
+    return this.isPerformingTask;
   }
 
   /**
-   * Send to break room
+   * Check if staff is currently waiting (during a task step)
    */
-  sendToBreakRoom(breakRoomX: number, breakRoomY: number): void {
-    this.currentState = "RESTING";
-    this.assignedPatientId = null;
-    this.targetX = breakRoomX;
-    this.targetY = breakRoomY;
+  getIsWaiting(): boolean {
+    return this.isWaiting;
   }
 
   /**
-   * Encourage staff (player action)
+   * Get current task
    */
-  encourage(): void {
-    // Small fatigue reduction
-    this.fatigue = Math.max(0, this.fatigue - 10);
-    this.updateFatigueBar();
-
-    // Visual feedback
-    this.scene.tweens.add({
-      targets: this,
-      scaleX: 1.2,
-      scaleY: 1.2,
-      duration: 200,
-      yoyo: true,
-    });
+  getCurrentTask(): StaffTask | null {
+    return this.currentTask;
   }
 
-  /**
-   * Get staff data
-   */
-  getData(): StaffData {
-    return {
-      id: this.staffId,
-      type: this.staffType,
-      name: this.staffName,
-      state: this.currentState,
-      fatigue: this.fatigue,
-      skill: this.skill,
-      assignedPatientId: this.assignedPatientId,
-      position: { x: this.x, y: this.y },
-    };
-  }
-
-  /**
-   * Get staff state
-   */
-  getState(): StaffState {
-    return this.currentState;
-  }
+  // ===========================================
+  // GETTERS
+  // ===========================================
 
   /**
    * Get staff ID
@@ -331,26 +462,45 @@ export class Staff extends Phaser.GameObjects.Container {
   }
 
   /**
-   * Get skill level
+   * Get staff name
    */
-  getSkill(): number {
-    return this.skill;
+  getName(): string {
+    return this.staffName;
   }
 
   /**
-   * Check if available for assignment
+   * Get current direction
    */
-  isAvailable(): boolean {
-    return (
-      this.currentState === "IDLE" &&
-      this.fatigue < STAFF_CONFIG.FATIGUE.EXHAUSTED_THRESHOLD
-    );
+  getDirection(): StaffDirection {
+    return this.direction;
   }
 
   /**
-   * Get fatigue level
+   * Get spawn position
    */
-  getFatigue(): number {
-    return this.fatigue;
+  getSpawnPosition(): { x: number; y: number } {
+    return { x: this.spawnX, y: this.spawnY };
+  }
+
+  /**
+   * Set spawn position (useful if staff needs to change home base)
+   */
+  setSpawnPosition(x: number, y: number): void {
+    this.spawnX = x;
+    this.spawnY = y;
+  }
+
+  /**
+   * Destroy staff
+   */
+  destroy(fromScene?: boolean): void {
+    if (this.waitTimer) {
+      this.waitTimer.destroy();
+      this.waitTimer = null;
+    }
+    this.sprite?.destroy();
+    this.shadow?.destroy();
+    this.nameTag?.destroy();
+    super.destroy(fromScene);
   }
 }
