@@ -69,7 +69,8 @@ export class Player extends Phaser.GameObjects.Container {
 
     // Create sprite using spritesheet or fallback to placeholder
     const textureKey = this.spriteConfig?.key || "player";
-    this.sprite = config.scene.add.sprite(0, 0, textureKey, 0);
+    // Y offset of -8 to align with 32x64 frame format
+    this.sprite = config.scene.add.sprite(0, -8, textureKey, 0);
     this.add(this.sprite);
 
     // Setup input

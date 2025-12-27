@@ -13,7 +13,11 @@ export interface BedConfig {
   y: number;
   number: number;
   id: string;
+  /** Direction the bed faces */
+  direction?: "up" | "down" | "left" | "right";
 }
+
+export type BedDirection = "up" | "down" | "left" | "right";
 
 export class Bed extends Phaser.GameObjects.Container {
   private sprite: Phaser.GameObjects.Sprite;
@@ -21,14 +25,18 @@ export class Bed extends Phaser.GameObjects.Container {
   private statusIndicator: Phaser.GameObjects.Arc;
   private needsAttentionIcon: Phaser.GameObjects.Text | null = null;
   private highlightGraphics: Phaser.GameObjects.Graphics | null = null;
+  private pointerSprite: Phaser.GameObjects.Sprite | null = null;
 
   // Data
   private bedId: string;
   private bedNumber: number;
+  private direction: BedDirection;
   private currentState: BedState;
   private patientId: string | null = null;
   private isWorking: boolean = true;
   private needsAttention: boolean = false;
+  private isPlayerNear: boolean = false;
+  private pointerRange: number = 150;
 
   // Collision bounds (for CollisionManager)
   public readonly collisionBounds = {
@@ -41,6 +49,7 @@ export class Bed extends Phaser.GameObjects.Container {
 
     this.bedId = config.id;
     this.bedNumber = config.number;
+    this.direction = config.direction || "down";
     this.currentState = "EMPTY";
 
     // Create visual representation
@@ -48,7 +57,20 @@ export class Bed extends Phaser.GameObjects.Container {
 
     // Add to scene
     config.scene.add.existing(this);
-    this.setDepth(20);
+
+    // Update depth based on Y position
+    this.updateDepth();
+  }
+
+  /**
+   * Update depth based on Y position (for proper rendering order)
+   */
+  updateDepth(): void {
+    this.setDepth(80 + this.y * 0.1);
+    // Keep pointer at higher depth
+    if (this.pointerSprite) {
+      this.pointerSprite.setDepth(9999);
+    }
   }
 
   /**
@@ -61,19 +83,23 @@ export class Bed extends Phaser.GameObjects.Container {
 
     // Bed sprite
     this.sprite = this.scene.add.sprite(0, 0, "bed");
+    this.sprite.setOrigin(0.5, 0.5);
     this.add(this.sprite);
 
-    // Number label
+    // Number label (positioned based on direction)
+    const labelOffset = this.getLabelOffset();
     this.numberLabel = this.scene.add
-      .text(0, 40, `${this.bedNumber}`, {
+      .text(labelOffset.x, labelOffset.y, `${this.bedNumber}`, {
         fontFamily: "Arial Black",
-        fontSize: "14px",
-        color: "#666666",
+        fontSize: "12px",
+        color: "#ffffff",
+        stroke: "#000000",
+        strokeThickness: 2,
       })
       .setOrigin(0.5);
     this.add(this.numberLabel);
 
-    // Status indicator (shows occupied/reserved)
+    // Status indicator (shows occupied/reserved/needs_attention)
     this.statusIndicator = this.scene.add.circle(18, -28, 6, 0x4ade80);
     this.statusIndicator.setVisible(false);
     this.add(this.statusIndicator);
@@ -88,12 +114,31 @@ export class Bed extends Phaser.GameObjects.Container {
   }
 
   /**
+   * Get label offset based on bed direction
+   */
+  private getLabelOffset(): { x: number; y: number } {
+    switch (this.direction) {
+      case "up":
+        return { x: 0, y: -35 };
+      case "down":
+        return { x: 0, y: 22 };
+      case "left":
+        return { x: 30, y: 0 };
+      case "right":
+        return { x: -30, y: 0 };
+      default:
+        return { x: 0, y: 35 };
+    }
+  }
+
+  /**
    * Update visual state
    */
   private updateVisuals(): void {
     if (!this.isWorking) {
       // Broken bed
-      this.sprite.setTint(0xff4444);
+      this.sprite.setTexture("bed_broken");
+      this.sprite.clearTint();
       this.statusIndicator.setFillStyle(0xff4444);
       this.statusIndicator.setVisible(true);
       return;
@@ -349,13 +394,115 @@ export class Bed extends Phaser.GameObjects.Container {
   }
 
   /**
+   * Update bed state based on player distance
+   * Call this every frame with the player position
+   */
+  update(playerX: number, playerY: number, interactionRange: number): void {
+    const distance = Phaser.Math.Distance.Between(
+      playerX,
+      playerY,
+      this.x,
+      this.y
+    );
+
+    this.isPlayerNear = distance <= interactionRange;
+
+    // Show/hide pointer based on distance
+    // Show pointer when player is within pointer range but NOT within interaction range
+    const shouldShowPointer =
+      distance <= this.pointerRange && distance > interactionRange;
+
+    if (shouldShowPointer && !this.pointerSprite?.visible) {
+      this.showPointer();
+    } else if (!shouldShowPointer && this.pointerSprite?.visible) {
+      this.hidePointer();
+    }
+  }
+
+  /**
+   * Show the pointer indicator
+   */
+  private showPointer(): void {
+    if (!this.pointerSprite) return;
+
+    this.pointerSprite.setVisible(true);
+
+    // Play arrow animation
+    if (this.scene.anims.exists("ui_arrow_down_anim")) {
+      this.pointerSprite.play("ui_arrow_down_anim");
+    }
+
+    // Fade in
+    this.pointerSprite.setAlpha(0);
+    this.scene.tweens.add({
+      targets: this.pointerSprite,
+      alpha: 1,
+      duration: 200,
+      ease: "Power2",
+    });
+  }
+
+  /**
+   * Hide the pointer indicator
+   */
+  private hidePointer(): void {
+    if (!this.pointerSprite) return;
+
+    this.scene.tweens.add({
+      targets: this.pointerSprite,
+      alpha: 0,
+      duration: 150,
+      ease: "Power2",
+      onComplete: () => {
+        this.pointerSprite?.setVisible(false);
+        this.pointerSprite?.stop();
+      },
+    });
+  }
+
+  /**
+   * Check if player is near the bed
+   */
+  getIsPlayerNear(): boolean {
+    return this.isPlayerNear;
+  }
+
+  /**
+   * Set the range at which the pointer appears
+   */
+  setPointerRange(range: number): void {
+    this.pointerRange = range;
+  }
+
+  /**
+   * Get bed direction
+   */
+  getDirection(): BedDirection {
+    return this.direction;
+  }
+
+  /**
+   * Get the position where a patient should be placed in this bed
+   * Returns the center of the bed with slight offset based on direction
+   */
+  getPatientPosition(): { x: number; y: number } {
+    // Patient position is at the bed center
+    // Bed is 64x64, patient is 32x64, both centered at origin 0.5
+    return { x: this.x, y: this.y - 12 };
+  }
+
+  /**
    * Destroy bed
    */
   destroy(fromScene?: boolean): void {
     if (this.needsAttentionIcon) {
       this.scene.tweens.killTweensOf(this.needsAttentionIcon);
     }
+    if (this.pointerSprite) {
+      this.scene.tweens.killTweensOf(this.pointerSprite);
+    }
     this.highlightGraphics?.destroy();
+    this.pointerSprite?.destroy();
     super.destroy(fromScene);
   }
 }

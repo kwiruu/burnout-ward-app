@@ -18,7 +18,7 @@ export {
   STAFF_SKINS,
   getRandomStaffSkin,
 } from "./Staff";
-export { Bed, type BedConfig } from "./Bed";
+export { Bed, type BedConfig, type BedDirection } from "./Bed";
 export { Equipment, type EquipmentConfig } from "./Equipment";
 export {
   Chair,

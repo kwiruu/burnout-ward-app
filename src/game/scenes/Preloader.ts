@@ -140,6 +140,11 @@ export class Preloader extends Scene {
     // Load tablet sprite (32x64)
     this.load.image("tablet", "src/resources/objects/tablet.png");
 
+    // Load bed sprites (48x64)
+    this.load.image("bed", "src/resources/objects/bed.png");
+    this.load.image("bed_occupied", "src/resources/objects/bed_occupied.png");
+    this.load.image("bed_broken", "src/resources/objects/bed_broken.png");
+
     // Load UI icon spritesheets (32x32, 6 frames each)
     this.load.spritesheet(
       "ui_arrow_down",
@@ -153,6 +158,42 @@ export class Preloader extends Scene {
       frameWidth: 32,
       frameHeight: 32,
     });
+    this.load.spritesheet("cursor", "src/resources/ui_icons/cursor.png", {
+      frameWidth: 32,
+      frameHeight: 32,
+    });
+
+    // Load emote spritesheets (32x48, 6 frames each)
+    this.load.spritesheet(
+      "emote_angry",
+      "src/resources/ui_icons/emote_angry.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
+    this.load.spritesheet(
+      "emote_exclamation",
+      "src/resources/ui_icons/emote_exclamation.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
+    this.load.spritesheet(
+      "emote_heart",
+      "src/resources/ui_icons/emote_heart.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
+    this.load.spritesheet(
+      "emote_broken_heart",
+      "src/resources/ui_icons/emote_broken_heart.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
+    this.load.spritesheet(
+      "emote_tired",
+      "src/resources/ui_icons/emote_tired.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
+    this.load.spritesheet(
+      "emote_question",
+      "src/resources/ui_icons/emote_question.png",
+      { frameWidth: 32, frameHeight: 48 }
+    );
 
     // Load character sprites as images (not spritesheets)
     // We'll add custom frames in create() to handle the 16px vertical gaps
@@ -168,7 +209,7 @@ export class Preloader extends Scene {
   }
 
   create(): void {
-    // Add custom frames to character textures (handles 16px vertical gaps)
+    // Add custom frames to character textures (32x64 frames, no gaps)
     Object.values(SPRITES).forEach((sprite) => {
       addCustomFramesToTexture(this, sprite);
     });
@@ -271,6 +312,29 @@ export class Preloader extends Scene {
       repeat: -1,
     });
 
+    // Emote animations (play once, slower, hold on last frame)
+    const emoteTypes = [
+      "angry",
+      "exclamation",
+      "heart",
+      "broken_heart",
+      "tired",
+      "question",
+    ];
+    emoteTypes.forEach((emoteType) => {
+      this.anims.create({
+        key: `emote_${emoteType}_anim`,
+        frames: this.anims.generateFrameNumbers(`emote_${emoteType}`, {
+          start: 0,
+          end: 5,
+        }),
+        frameRate: 5,
+        repeat: 0,
+        hideOnComplete: false,
+      });
+    });
+
     console.log("✅ UI icon animations created");
+    console.log("✅ Emote animations created");
   }
 }

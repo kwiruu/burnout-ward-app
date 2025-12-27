@@ -53,8 +53,7 @@ export interface SpriteSheetConfig {
 
 /**
  * Standard character animation template
- * Frame size: 32x48
- * Gap between animation groups: 16px
+ * Frame size: 32x64 (no gap between rows)
  */
 export interface CharacterAnimationTemplate {
   frameWidth: number;
@@ -70,8 +69,8 @@ export interface CharacterAnimationTemplate {
 
 export const CHARACTER_ANIM_TEMPLATE: CharacterAnimationTemplate = {
   frameWidth: 32,
-  frameHeight: 48,
-  gapBetweenAnimations: 16,
+  frameHeight: 64,
+  gapBetweenAnimations: 0,
   animations: [
     // Order matters - this determines Y position!
     {
@@ -153,14 +152,14 @@ export const CHARACTER_ANIM_TEMPLATE: CharacterAnimationTemplate = {
  * Layout: Each animation group is ONE ROW with directions laid out horizontally:
  * [right frames][up frames][left frames][down frames]
  *
- * There's a 16px gap at the top and between each row.
+ * Frames are 32x64 with no gaps between rows.
  */
 export function generateCharacterAnimations(
   spriteKey: string,
   template: CharacterAnimationTemplate = CHARACTER_ANIM_TEMPLATE
 ): AnimationDef[] {
   const animations: AnimationDef[] = [];
-  let currentY = template.gapBetweenAnimations; // Start with initial 16px gap at top
+  let currentY = 0; // No initial gap
 
   for (const anim of template.animations) {
     // All directions are in the SAME ROW, laid out horizontally

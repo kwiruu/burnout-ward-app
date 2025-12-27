@@ -30,6 +30,8 @@ export interface Interactable {
   showPointerWhenFar?: boolean;
   /** Optional: custom Y offset for the prompt */
   promptYOffset?: number;
+  /** Optional: dynamic position getter (for moving entities like patients) */
+  getPosition?: () => { x: number; y: number };
 }
 
 export class InteractionManager {
@@ -114,11 +116,16 @@ export class InteractionManager {
     for (const interactable of this.interactables.values()) {
       if (!interactable.canInteract()) continue;
 
+      // Get dynamic position if available
+      const pos = interactable.getPosition
+        ? interactable.getPosition()
+        : { x: interactable.x, y: interactable.y };
+
       const distance = Phaser.Math.Distance.Between(
         playerX,
         playerY,
-        interactable.x,
-        interactable.y
+        pos.x,
+        pos.y
       );
 
       if (distance < nearestDistance) {
@@ -140,11 +147,11 @@ export class InteractionManager {
 
     // Update prompt position if visible
     if (nearestTarget && this.promptContainer?.visible) {
+      const pos = nearestTarget.getPosition
+        ? nearestTarget.getPosition()
+        : { x: nearestTarget.x, y: nearestTarget.y };
       const yOffset = nearestTarget.promptYOffset ?? -40;
-      this.promptContainer.setPosition(
-        nearestTarget.x,
-        nearestTarget.y + yOffset
-      );
+      this.promptContainer.setPosition(pos.x, pos.y + yOffset);
     }
   }
 

@@ -136,9 +136,14 @@ export class Door extends Phaser.GameObjects.Container {
   }
 
   /**
-   * Check if player is near and handle auto-open
+   * Check if player or NPCs are near and handle auto-open
    */
-  update(playerX: number, playerY: number, delta: number): void {
+  update(
+    playerX: number,
+    playerY: number,
+    delta: number,
+    npcs: Array<{ x: number; y: number }> = []
+  ): void {
     if (!this.autoOpen) return;
 
     // Decrement cooldown timer
@@ -146,26 +151,45 @@ export class Door extends Phaser.GameObjects.Container {
       this.openCooldown -= delta;
     }
 
-    const dx = playerX - this.x;
-    const dy = playerY - this.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
+    // Check player distance
+    const playerDx = playerX - this.x;
+    const playerDy = playerY - this.y;
+    const playerDistance = Math.sqrt(playerDx * playerDx + playerDy * playerDy);
 
-    if (distance < this.triggerDistance) {
-      // Player is near - open door
+    // Check NPC distances
+    let closestNpcDistance = Infinity;
+    let closestNpcDy = 0;
+    for (const npc of npcs) {
+      const dx = npc.x - this.x;
+      const dy = npc.y - this.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance < closestNpcDistance) {
+        closestNpcDistance = distance;
+        closestNpcDy = dy;
+      }
+    }
+
+    // Use the closest entity (player or NPC)
+    const minDistance = Math.min(playerDistance, closestNpcDistance);
+    const usePlayerDirection = playerDistance <= closestNpcDistance;
+    const approachDy = usePlayerDirection ? playerDy : closestNpcDy;
+
+    if (minDistance < this.triggerDistance) {
+      // Someone is near - open door
       let direction: DoorDirection;
 
       if (this.doorType === "single") {
         // Single door always opens in fixed direction
         direction = this.fixedDirection;
       } else {
-        // Dual door opens based on player approach direction
-        direction = dy < 0 ? "up" : "down";
+        // Dual door opens based on approach direction (prioritize player)
+        direction = approachDy < 0 ? "up" : "down";
       }
 
       this.open(direction);
-      this.closeTimer = 0; // Reset timer while player is near
-    } else if (distance > this.triggerDistance + 20) {
-      // Player moved away - start close timer
+      this.closeTimer = 0; // Reset timer while someone is near
+    } else if (minDistance > this.triggerDistance + 20) {
+      // Everyone moved away - start close timer
       if (this.doorState === "open") {
         this.closeTimer += delta;
         if (this.closeTimer >= this.closeDelay) {

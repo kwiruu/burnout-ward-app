@@ -14,15 +14,17 @@
             "scaleInDock": 1.5
         },
         "map01.tmx": {
-            "scale": 0.5,
-            "selectedLayer": 0,
+            "scale": 0.75,
+            "selectedLayer": 8,
             "viewCenter": {
-                "x": 437,
-                "y": 859
+                "x": 344.66666666666663,
+                "y": 995.3333333333333
             }
         }
     },
+    "last.exportedFilePath": "C:/Users/keiru/Documents/4thyr-1stsem/burnout-ward/burnout-ward-app/src/resources",
     "map.height": 30,
+    "map.lastUsedExportFilter": "All Files (*)",
     "map.lastUsedFormat": "tmx",
     "map.width": 40,
     "openFiles": [

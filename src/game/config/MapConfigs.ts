@@ -51,6 +51,19 @@ export interface ChairConfig {
 }
 
 /**
+ * Bed configuration for a map
+ */
+export interface BedMapConfig {
+  id: string;
+  /** Bed number (1-6) for display */
+  number: number;
+  x: number;
+  y: number;
+  /** Direction the bed faces (affects patient position) */
+  direction?: "up" | "down" | "left" | "right";
+}
+
+/**
  * A single step in a staff task
  */
 export interface TaskStepConfig {
@@ -85,7 +98,11 @@ export interface StaffMapConfig {
   y: number;
   spriteKey?: string;
   name?: string;
-  /** Task to start automatically (optional) */
+  /** Staff type: NURSE or DOCTOR */
+  type?: "NURSE" | "DOCTOR";
+  /** Skill level (affects treatment speed) */
+  skill?: number;
+  /** Task to start automatically (optional - legacy) */
   autoTask?: TaskConfig;
 }
 
@@ -148,9 +165,12 @@ export interface MapConfig {
   spawnPoints: SpawnPoint[];
   doors: DoorConfig[];
   chairs: ChairConfig[];
+  beds: BedMapConfig[];
   staffs: StaffMapConfig[];
   tablets: TabletMapConfig[];
   gameConfig: GameConfig;
+  /** Break room position for staff to rest */
+  breakRoomPosition?: { x: number; y: number };
 }
 
 /**
@@ -312,51 +332,25 @@ export const MAP_ER_FLOOR1: MapConfig = {
     { id: "chair_13", x: 592, y: 1128, color: "red", direction: "down" },
     { id: "chair_14", x: 560, y: 1128, color: "red", direction: "down" },
   ],
+  beds: [
+    // ER beds - Room 1 (top left area)
+    { id: "bed_1", number: 1, x: 576, y: 788, direction: "down" },
+    { id: "bed_2", number: 2, x: 704, y: 788, direction: "down" },
+    { id: "bed_3", number: 3, x: 832, y: 788, direction: "down" },
+    // ER beds - Room 2 (middle area)
+    { id: "bed_4", number: 4, x: 576, y: 948, direction: "down" },
+    { id: "bed_5", number: 5, x: 704, y: 948, direction: "down" },
+    { id: "bed_6", number: 6, x: 832, y: 948, direction: "down" },
+  ],
   staffs: [
     {
-      id: "staff_receptionist",
-      x: 255,
-      y: 1090,
-      spriteKey: "staff01",
-      name: "Receptionist",
-      autoTask: {
-        id: "patrol_desk",
-        name: "Patrol Reception Desk",
-        steps: [
-          {
-            walkTo: { x: 254, y: 1090 },
-            waitMs: 3000,
-            animation: "idle",
-            direction: "down",
-          },
-          {
-            walkTo: { x: 254, y: 1090 },
-            waitMs: 3000,
-            animation: "read",
-            direction: "down",
-          },
-          {
-            walkTo: { x: 254, y: 1090 },
-            waitMs: 4000,
-            animation: "idle",
-            direction: "down",
-          },
-          {
-            walkTo: { x: 254, y: 1090 },
-            waitMs: 3000,
-            animation: "put",
-            direction: "down",
-          },
-        ],
-        loop: true,
-      },
-    },
-    {
       id: "staff_nurse1",
-      x: 400,
+      x: 450,
       y: 600,
       spriteKey: "staff02",
       name: "Nurse",
+      type: "NURSE",
+      skill: 1,
     },
     {
       id: "staff_storage",
@@ -451,6 +445,45 @@ export const MAP_ER_FLOOR1: MapConfig = {
         loop: true,
       },
     },
+
+    {
+      id: "staff_receptionist",
+      x: 255,
+      y: 1090,
+      spriteKey: "staff01",
+      name: "Receptionist",
+      autoTask: {
+        id: "patrol_desk",
+        name: "Patrol Reception Desk",
+        steps: [
+          {
+            walkTo: { x: 254, y: 1090 },
+            waitMs: 3000,
+            animation: "idle",
+            direction: "down",
+          },
+          {
+            walkTo: { x: 254, y: 1090 },
+            waitMs: 3000,
+            animation: "read",
+            direction: "down",
+          },
+          {
+            walkTo: { x: 254, y: 1090 },
+            waitMs: 4000,
+            animation: "idle",
+            direction: "down",
+          },
+          {
+            walkTo: { x: 254, y: 1090 },
+            waitMs: 3000,
+            animation: "put",
+            direction: "down",
+          },
+        ],
+        loop: true,
+      },
+    },
   ],
   tablets: [
     {
@@ -462,7 +495,7 @@ export const MAP_ER_FLOOR1: MapConfig = {
   ],
   gameConfig: {
     // Patient spawn timing
-    spawnRateMs: 15000, // Start: spawn every 15 seconds
+    spawnRateMs: 1000, // Start: spawn every 15 seconds
     minSpawnRateMs: 8000, // Minimum: spawn every 8 seconds
     spawnRateDecreaseMs: 100, // Decrease by 100ms each spawn
     maxPatients: 8, // Maximum patients at once

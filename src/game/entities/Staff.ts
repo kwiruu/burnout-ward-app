@@ -1,9 +1,13 @@
 /**
  * Staff Entity
  * Staff members that perform tasks around the hospital
+ * Supports AI-controlled patient treatment and fatigue system
  */
 
 import { SpriteSheetConfig, getSpriteConfig } from "../config/SpriteConfigs";
+import { PathfindingManager, PathPoint } from "../systems/PathfindingManager";
+import { STAFF_CONFIG } from "../utils/Constants";
+import { StaffState, StaffType, StaffData } from "../types";
 import EventBus from "../utils/EventBus";
 
 // Available staff skins
@@ -66,12 +70,19 @@ export interface StaffConfig {
   spriteKey?: string;
   /** Optional name tag */
   name?: string;
+  /** Staff type (nurse or doctor) */
+  type?: StaffType;
+  /** Skill level (affects treatment speed) */
+  skill?: number;
 }
 
 export class Staff extends Phaser.GameObjects.Container {
   private sprite: Phaser.GameObjects.Sprite;
   private shadow: Phaser.GameObjects.Ellipse;
   private nameTag: Phaser.GameObjects.Text | null = null;
+  private fatigueIndicator: Phaser.GameObjects.Graphics | null = null;
+  private fatigueBg: Phaser.GameObjects.Graphics | null = null;
+  private emoteSprite: Phaser.GameObjects.Sprite | null = null;
   private spriteConfig: SpriteSheetConfig | null = null;
   private spriteKey: string;
   private currentAnimKey: string = "";
@@ -80,6 +91,13 @@ export class Staff extends Phaser.GameObjects.Container {
   // Identity
   private staffId: string;
   private staffName: string;
+  private staffType: StaffType;
+
+  // Stats
+  private fatigue: number = 0;
+  private skill: number = 1;
+  private currentState: StaffState = "IDLE";
+  private assignedPatientId: string | null = null;
 
   // Spawn position (to return to)
   private spawnX: number;
@@ -87,10 +105,16 @@ export class Staff extends Phaser.GameObjects.Container {
 
   // Walking
   private walkTarget: { x: number; y: number } | null = null;
-  private walkSpeed: number = 80;
+  private walkSpeed: number = STAFF_CONFIG.SPEED;
+  private baseWalkSpeed: number = STAFF_CONFIG.SPEED;
   private onArriveCallback: (() => void) | null = null;
 
-  // Task system
+  // Pathfinding
+  private pathfindingManager: PathfindingManager | null = null;
+  private waypoints: PathPoint[] = [];
+  private waypointIndex: number = 0;
+
+  // Task system (legacy - keep for backwards compatibility)
   private isPerformingTask: boolean = false;
   private currentTask: StaffTask | null = null;
   private currentStepIndex: number = 0;
@@ -102,6 +126,8 @@ export class Staff extends Phaser.GameObjects.Container {
 
     this.staffId = config.id;
     this.staffName = config.name || "";
+    this.staffType = config.type || "NURSE";
+    this.skill = config.skill || STAFF_CONFIG.TYPES[this.staffType].skill;
     this.spawnX = config.x;
     this.spawnY = config.y;
 
@@ -134,8 +160,21 @@ export class Staff extends Phaser.GameObjects.Container {
 
     // Main sprite
     const textureKey = this.spriteConfig?.key || "staff01";
-    this.sprite = this.scene.add.sprite(0, 0, textureKey, 0);
+    // Y offset of -8 to align with 32x64 frame format
+    this.sprite = this.scene.add.sprite(0, -8, textureKey, 0);
     this.add(this.sprite);
+
+    // Fatigue indicator background
+    // NOT added to container - positioned manually for higher depth
+    this.fatigueBg = this.scene.add.graphics();
+    this.fatigueBg.setDepth(500); // Above above-player layer (300)
+    this.fatigueBg.setVisible(false);
+
+    // Fatigue indicator bar
+    // NOT added to container - positioned manually for higher depth
+    this.fatigueIndicator = this.scene.add.graphics();
+    this.fatigueIndicator.setDepth(501);
+    this.fatigueIndicator.setVisible(false);
 
     // Name tag (optional)
     if (this.staffName) {
@@ -150,6 +189,20 @@ export class Staff extends Phaser.GameObjects.Container {
         .setOrigin(0.5);
       this.add(this.nameTag);
     }
+
+    // Emote sprite (hidden by default, shown above staff head)
+    // NOT added to container - positioned manually for higher depth
+    this.emoteSprite = this.scene.add.sprite(
+      this.x,
+      this.y - 60,
+      "emote_heart",
+      0
+    );
+    this.emoteSprite.setVisible(false);
+    this.emoteSprite.setDepth(600); // Above above-player layer and indicators
+
+    // Update fatigue visual
+    this.updateFatigueIndicator();
   }
 
   /**
@@ -157,6 +210,21 @@ export class Staff extends Phaser.GameObjects.Container {
    */
   updateDepth(): void {
     this.setDepth(80 + this.y * 0.1);
+    // Update UI element positions (they're not in container)
+    this.updateUIPositions();
+  }
+
+  /**
+   * Update positions of UI elements that are not in the container
+   */
+  private updateUIPositions(): void {
+    // Update fatigue indicator position
+    this.updateFatigueIndicator();
+
+    // Update emote position
+    if (this.emoteSprite) {
+      this.emoteSprite.setPosition(this.x + 20, this.y - 45);
+    }
   }
 
   /**
@@ -228,21 +296,46 @@ export class Staff extends Phaser.GameObjects.Container {
     const distance = Math.sqrt(dx * dx + dy * dy);
 
     if (distance < 2) {
-      // Arrived at target
+      // Arrived at current waypoint
       this.x = this.walkTarget.x;
       this.y = this.walkTarget.y;
-      this.walkTarget = null;
 
-      // Play idle animation
-      this.playAnimation("idle", this.direction);
+      // Check for more waypoints
+      if (
+        this.waypoints.length > 0 &&
+        this.waypointIndex < this.waypoints.length - 1
+      ) {
+        // Move to next waypoint
+        this.waypointIndex++;
+        const nextWaypoint = this.waypoints[this.waypointIndex];
+        this.walkTarget = { x: nextWaypoint.x, y: nextWaypoint.y };
 
-      // Update depth
-      this.updateDepth();
+        // Update direction for next segment
+        const nextDx = nextWaypoint.x - this.x;
+        const nextDy = nextWaypoint.y - this.y;
+        if (Math.abs(nextDx) > Math.abs(nextDy)) {
+          this.direction = nextDx > 0 ? "right" : "left";
+        } else {
+          this.direction = nextDy > 0 ? "down" : "up";
+        }
+        this.playAnimation("walk", this.direction);
+      } else {
+        // No more waypoints, we're done
+        this.walkTarget = null;
+        this.waypoints = [];
+        this.waypointIndex = 0;
 
-      // Call arrive callback
-      if (this.onArriveCallback) {
-        this.onArriveCallback();
-        this.onArriveCallback = null;
+        // Play idle animation
+        this.playAnimation("idle", this.direction);
+
+        // Update depth
+        this.updateDepth();
+
+        // Call arrive callback
+        if (this.onArriveCallback) {
+          this.onArriveCallback();
+          this.onArriveCallback = null;
+        }
       }
     } else {
       // Move towards target
@@ -451,6 +544,327 @@ export class Staff extends Phaser.GameObjects.Container {
   }
 
   // ===========================================
+  // FATIGUE & STATE SYSTEM
+  // ===========================================
+
+  /**
+   * Update fatigue indicator visual
+   */
+  private updateFatigueIndicator(): void {
+    if (!this.fatigueIndicator) return;
+
+    this.fatigueIndicator.clear();
+    if (this.fatigueBg) {
+      this.fatigueBg.clear();
+    }
+
+    // Only show when fatigue > 20%
+    const showIndicator = this.fatigue > 20;
+    this.fatigueIndicator.setVisible(showIndicator);
+    this.fatigueBg?.setVisible(showIndicator);
+
+    if (!showIndicator) return;
+
+    // Draw background at world position
+    if (this.fatigueBg) {
+      this.fatigueBg.fillStyle(0x333333, 0.8);
+      this.fatigueBg.fillRect(this.x - 14, this.y - 48, 28, 6);
+    }
+
+    const percentage = this.fatigue / STAFF_CONFIG.FATIGUE.MAX;
+    const barWidth = 28 * percentage;
+
+    // Color based on fatigue level
+    let color = 0x4ade80; // Green - low fatigue
+    if (percentage > 0.5) color = 0xfbbf24; // Yellow - medium
+    if (percentage > 0.8) color = 0xef4444; // Red - high/exhausted
+
+    this.fatigueIndicator.fillStyle(color, 1);
+    this.fatigueIndicator.fillRect(this.x - 14, this.y - 48, barWidth, 6);
+  }
+
+  /**
+   * Show an emote above the staff's head
+   * @param emoteType - Type of emote: "angry", "exclamation", "heart", "broken_heart", "tired", "question"
+   * @param duration - Optional duration in ms before auto-hide (0 = no auto-hide)
+   */
+  showEmote(emoteType: string, duration: number = 0): void {
+    if (!this.emoteSprite) return;
+
+    // Change texture to the correct emote
+    const textureKey = `emote_${emoteType}`;
+    const animKey = `emote_${emoteType}_anim`;
+
+    // Check if texture exists
+    if (!this.scene.textures.exists(textureKey)) {
+      console.warn(`Emote texture ${textureKey} not found`);
+      return;
+    }
+
+    this.emoteSprite.setTexture(textureKey);
+    this.emoteSprite.setVisible(true);
+
+    // Play animation if it exists
+    if (this.scene.anims.exists(animKey)) {
+      this.emoteSprite.play(animKey);
+
+      // After animation completes, hold on last frame for 4 seconds, then hide
+      this.emoteSprite.once("animationcomplete", () => {
+        this.scene.time.delayedCall(4000, () => {
+          this.hideEmote();
+        });
+      });
+    } else if (duration > 0) {
+      // Fallback: Auto-hide after duration if animation doesn't exist
+      this.scene.time.delayedCall(duration, () => {
+        this.hideEmote();
+      });
+    }
+  }
+
+  /**
+   * Hide the current emote
+   */
+  hideEmote(): void {
+    if (!this.emoteSprite) return;
+    this.emoteSprite.setVisible(false);
+    this.emoteSprite.stop();
+  }
+
+  /**
+   * Get current fatigue level
+   */
+  getFatigue(): number {
+    return this.fatigue;
+  }
+
+  /**
+   * Add to fatigue (can be negative to reduce)
+   */
+  addFatigue(amount: number): void {
+    this.fatigue = Math.max(
+      0,
+      Math.min(STAFF_CONFIG.FATIGUE.MAX, this.fatigue + amount)
+    );
+    this.updateFatigueIndicator();
+
+    // Update walk speed based on fatigue
+    if (this.fatigue >= STAFF_CONFIG.FATIGUE.EXHAUSTED_THRESHOLD) {
+      this.walkSpeed = this.baseWalkSpeed * 0.5; // 50% speed when exhausted
+    } else {
+      this.walkSpeed = this.baseWalkSpeed;
+    }
+  }
+
+  /**
+   * Get staff state
+   */
+  getStaffState(): StaffState {
+    return this.currentState;
+  }
+
+  /**
+   * Set staff state
+   */
+  setStaffState(state: StaffState): void {
+    const oldState = this.currentState;
+    this.currentState = state;
+
+    EventBus.emit("staff:state_changed", {
+      staffId: this.staffId,
+      oldState,
+      newState: state,
+    });
+  }
+
+  /**
+   * Get staff type
+   */
+  getStaffType(): StaffType {
+    return this.staffType;
+  }
+
+  /**
+   * Get skill level
+   */
+  getSkill(): number {
+    return this.skill;
+  }
+
+  /**
+   * Get assigned patient ID
+   */
+  getAssignedPatientId(): string | null {
+    return this.assignedPatientId;
+  }
+
+  /**
+   * Assign to a patient
+   */
+  assignToPatient(patientId: string): void {
+    this.assignedPatientId = patientId;
+    this.setStaffState("MOVING_TO_PATIENT");
+  }
+
+  /**
+   * Clear current assignment
+   */
+  clearAssignment(): void {
+    this.assignedPatientId = null;
+    this.setStaffState("IDLE");
+  }
+
+  /**
+   * Start treating assigned patient
+   */
+  startTreating(): void {
+    this.setStaffState("TREATING");
+    // Play treating animation (use idle facing the bed for now)
+    this.playAnimation("idle", "left");
+  }
+
+  /**
+   * Finish treating - return to idle
+   */
+  finishTreating(): void {
+    this.assignedPatientId = null;
+    this.setStaffState("IDLE");
+    this.returnToSpawn();
+
+    EventBus.emit("staff:treatment_complete", {
+      staffId: this.staffId,
+    });
+  }
+
+  /**
+   * Become exhausted
+   */
+  becomeExhausted(): void {
+    this.setStaffState("EXHAUSTED");
+
+    // Visual feedback - tint slightly and show tired emote
+    this.sprite.setTint(0xcccccc);
+    this.showEmote("tired"); // Show tired emote when exhausted
+
+    EventBus.emit("staff:exhausted", {
+      staffId: this.staffId,
+      fatigue: this.fatigue,
+    });
+  }
+
+  /**
+   * Finish resting - fully recovered
+   */
+  finishResting(): void {
+    this.fatigue = 0;
+    this.walkSpeed = this.baseWalkSpeed;
+    this.sprite.clearTint();
+    this.hideEmote(); // Hide tired emote when recovered
+    this.setStaffState("IDLE");
+    this.updateFatigueIndicator();
+
+    EventBus.emit("staff:recovered", {
+      staffId: this.staffId,
+    });
+  }
+
+  /**
+   * Show encourage effect (player encouraged this staff)
+   */
+  showEncourageEffect(): void {
+    // Flash green and scale up briefly
+    this.scene.tweens.add({
+      targets: this.sprite,
+      scaleX: 1.2,
+      scaleY: 1.2,
+      duration: 150,
+      yoyo: true,
+      onStart: () => {
+        this.sprite.setTint(0x4ade80);
+      },
+      onComplete: () => {
+        if (this.currentState !== "EXHAUSTED") {
+          this.sprite.clearTint();
+        }
+      },
+    });
+  }
+
+  /**
+   * Get staff data for UI/saving
+   */
+  getData(): StaffData {
+    return {
+      id: this.staffId,
+      type: this.staffType,
+      name: this.staffName,
+      state: this.currentState,
+      fatigue: this.fatigue,
+      skill: this.skill,
+      assignedPatientId: this.assignedPatientId,
+      position: { x: this.x, y: this.y },
+    };
+  }
+
+  // ===========================================
+  // PATHFINDING
+  // ===========================================
+
+  /**
+   * Set pathfinding manager
+   */
+  setPathfindingManager(manager: PathfindingManager): void {
+    this.pathfindingManager = manager;
+  }
+
+  /**
+   * Walk to target using pathfinding
+   */
+  walkToWithPathfinding(
+    targetX: number,
+    targetY: number,
+    onArrive?: () => void
+  ): void {
+    if (!this.pathfindingManager) {
+      // Fallback to direct walk if no pathfinding
+      this.walkTo(targetX, targetY, onArrive);
+      return;
+    }
+
+    this.onArriveCallback = onArrive || null;
+
+    // Find path
+    this.pathfindingManager
+      .findPath(this.x, this.y, targetX, targetY)
+      .then((path) => {
+        if (path && path.length > 0) {
+          this.waypoints = path;
+          this.waypointIndex = 0;
+
+          // Set first waypoint as target
+          const firstWaypoint = this.waypoints[0];
+          this.walkTarget = { x: firstWaypoint.x, y: firstWaypoint.y };
+
+          // Start walking animation
+          const dx = firstWaypoint.x - this.x;
+          const dy = firstWaypoint.y - this.y;
+          if (Math.abs(dx) > Math.abs(dy)) {
+            this.direction = dx > 0 ? "right" : "left";
+          } else {
+            this.direction = dy > 0 ? "down" : "up";
+          }
+          this.playAnimation("walk", this.direction);
+        } else {
+          // Fallback to direct walk
+          console.warn(
+            `Staff ${this.staffId}: No path found, walking directly`
+          );
+          this.walkTo(targetX, targetY, onArrive);
+        }
+      });
+  }
+
+  // ===========================================
   // GETTERS
   // ===========================================
 
@@ -501,6 +915,9 @@ export class Staff extends Phaser.GameObjects.Container {
     this.sprite?.destroy();
     this.shadow?.destroy();
     this.nameTag?.destroy();
+    this.fatigueIndicator?.destroy();
+    this.fatigueBg?.destroy();
+    this.emoteSprite?.destroy();
     super.destroy(fromScene);
   }
 }

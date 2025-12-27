@@ -363,6 +363,7 @@ export const EVENTS = {
   PATIENT_ASSIGNED_BED: "patient:assignedBed",
   PATIENT_WORSENED: "patient:worsened",
   PATIENT_DIED: "patient:died",
+  PATIENT_TREATMENT_STARTED: "patient:treatmentStarted",
   PATIENT_STABILIZED: "patient:stabilized",
   PATIENT_DISCHARGED: "patient:discharged",
 

@@ -1,5 +1,5 @@
 import { Scene } from "phaser";
-import { SCENES, GAME_CONFIG, MAP_PADDING } from "../utils/Constants";
+import { SCENES, GAME_CONFIG, MAP_PADDING, EVENTS } from "../utils/Constants";
 import { GameSceneData } from "../types";
 import EventBus from "../utils/EventBus";
 
@@ -7,6 +7,8 @@ import EventBus from "../utils/EventBus";
 import { ImageMapLoader } from "../systems/ImageMapLoader";
 import { CollisionManager } from "../systems/CollisionManager";
 import { InteractionManager } from "../systems/InteractionManager";
+import { PathfindingManager } from "../systems/PathfindingManager";
+import { StaffAI } from "../systems/StaffAI";
 
 // Import entities
 import { Player } from "../entities/Player";
@@ -39,6 +41,8 @@ export class Game extends Scene {
   private imageMapLoader!: ImageMapLoader;
   private collisionManager!: CollisionManager;
   private interactionManager!: InteractionManager;
+  private pathfindingManager!: PathfindingManager;
+  private staffAI!: StaffAI;
 
   // Game objects
   private player!: Player;
@@ -53,6 +57,9 @@ export class Game extends Scene {
   private currentSpawnRate: number = 0;
   private patientSpawnTimer!: Phaser.Time.TimerEvent;
   private patientIdCounter: number = 0;
+
+  // Selected patient for bed assignment (from triage interaction)
+  private selectedPatientForBed: Patient | null = null;
 
   // Game state
   private shiftTimer: number = 0;
@@ -72,8 +79,14 @@ export class Game extends Scene {
   private patientsDied: number = 0;
   private peakChaos: number = 0;
 
+  // Treatment tracking
+  private currentTreatmentPatient: Patient | null = null;
+
   // Debug
   private debugMode: boolean = false;
+
+  // Custom cursor
+  private cursorSprite!: Phaser.GameObjects.Sprite;
 
   constructor() {
     super(SCENES.GAME);
@@ -108,6 +121,9 @@ export class Game extends Scene {
 
     // Initialize systems
     this.initializeSystems();
+
+    // Setup custom cursor
+    this.setupCustomCursor();
 
     // Load map layers (images) and collision
     this.loadMapImages();
@@ -148,6 +164,12 @@ export class Game extends Scene {
     // Start patient spawning
     this.startPatientSpawning();
 
+    // Set up bed assignment hotkeys
+    this.setupBedAssignment();
+
+    // Set up patient event listeners
+    this.setupPatientEvents();
+
     // Set up pause functionality
     this.setupPause();
 
@@ -163,12 +185,25 @@ export class Game extends Scene {
   update(_time: number, delta: number): void {
     if (this.isPaused) return;
 
+    // Update custom cursor position
+    const pointer = this.input.activePointer;
+    this.cursorSprite.setPosition(pointer.x, pointer.y);
+
     // Update player
     this.player.update(delta);
 
-    // Update doors (check proximity to player for auto-open)
+    // Update doors (check proximity to player and NPCs for auto-open)
     const playerPos = this.player.getPosition();
-    this.doors.forEach((door) => door.update(playerPos.x, playerPos.y, delta));
+
+    // Collect all NPC positions (patients and staff)
+    const npcPositions = [
+      ...this.patients.map((p) => ({ x: p.x, y: p.y })),
+      ...this.staffs.map((s) => ({ x: s.x, y: s.y })),
+    ];
+
+    this.doors.forEach((door) =>
+      door.update(playerPos.x, playerPos.y, delta, npcPositions)
+    );
 
     // Update patients
     this.patients.forEach((patient) => patient.update(delta));
@@ -176,10 +211,22 @@ export class Game extends Scene {
     // Update staff
     this.staffs.forEach((staff) => staff.update(delta));
 
+    // Update Staff AI system
+    this.staffAI.setPatients(this.patients.filter((p) => p.active));
+    this.staffAI.update(delta);
+
+    // Update treatment progress (player treatment)
+    this.updateTreatment(delta);
+
     // Update tablets (for pointer indicator)
     const interactionRange = this.interactionManager.getInteractionRange();
     this.tablets.forEach((tablet) =>
       tablet.update(playerPos.x, playerPos.y, interactionRange)
+    );
+
+    // Update beds (for pointer indicator)
+    this.beds.forEach((bed) =>
+      bed.update(playerPos.x, playerPos.y, interactionRange)
     );
 
     // Update interaction manager with player position
@@ -190,6 +237,53 @@ export class Game extends Scene {
 
     // Update HUD
     this.updateHUD();
+  }
+
+  /**
+   * Update active treatment
+   */
+  private updateTreatment(delta: number): void {
+    if (!this.currentTreatmentPatient) return;
+
+    // Check if patient is still being treated
+    if (!this.currentTreatmentPatient.isBeingTreated()) {
+      // Treatment finished or patient state changed
+      if (this.currentTreatmentPatient.getState() === "STABILIZED") {
+        // Release the bed
+        const bedId = this.currentTreatmentPatient.getData().assignedBedId;
+        if (bedId) {
+          const bed = this.beds.get(bedId);
+          if (bed) {
+            bed.release();
+          }
+        }
+        this.patientsSaved++;
+        console.log(`✅ Patient saved!`);
+      }
+      this.currentTreatmentPatient = null;
+      return;
+    }
+
+    // Check if player is still near the bed
+    const playerPos = this.player.getPosition();
+    const bedId = this.currentTreatmentPatient.getData().assignedBedId;
+    if (bedId) {
+      const bed = this.beds.get(bedId);
+      if (bed) {
+        const distance = Phaser.Math.Distance.Between(
+          playerPos.x,
+          playerPos.y,
+          bed.x,
+          bed.y
+        );
+        const interactionRange = this.interactionManager.getInteractionRange();
+
+        // Only progress treatment if player is close enough
+        if (distance <= interactionRange * 1.5) {
+          this.currentTreatmentPatient.progressTreatment(delta);
+        }
+      }
+    }
   }
 
   /**
@@ -204,6 +298,29 @@ export class Game extends Scene {
 
     // Interaction manager (handles E key interactions)
     this.interactionManager = new InteractionManager(this);
+  }
+
+  /**
+   * Setup custom cursor sprite
+   */
+  private setupCustomCursor(): void {
+    // Hide default cursor
+    this.input.setDefaultCursor("none");
+
+    // Create cursor sprite (frame 0 = normal, frame 1 = click)
+    this.cursorSprite = this.add.sprite(0, 0, "cursor", 0);
+    this.cursorSprite.setDepth(10000);
+    this.cursorSprite.setScrollFactor(0);
+
+    // Handle mouse down (show click frame)
+    this.input.on("pointerdown", () => {
+      this.cursorSprite.setFrame(1);
+    });
+
+    // Handle mouse up (show normal frame)
+    this.input.on("pointerup", () => {
+      this.cursorSprite.setFrame(0);
+    });
   }
 
   // Map offset to center it horizontally
@@ -239,7 +356,8 @@ export class Game extends Scene {
 
     // Clear any default colliders and set map bounds with offset
     this.collisionManager.clearAll();
-    this.collisionManager.setMapBounds(getMapBounds(this.currentMap));
+    const mapBounds = getMapBounds(this.currentMap);
+    this.collisionManager.setMapBounds(mapBounds);
 
     this.imageMapLoader.loadCollisionData(collisionData);
     const collisionObjects = this.imageMapLoader.getCollisionObjects();
@@ -256,6 +374,30 @@ export class Game extends Scene {
     });
 
     console.log(`✅ Applied ${collisionObjects.length} collision objects`);
+
+    // Initialize pathfinding after collision is loaded
+    this.pathfindingManager = new PathfindingManager(
+      this,
+      this.collisionManager,
+      mapBounds,
+      16 // tile size for pathfinding grid
+    );
+    console.log(`✅ Pathfinding initialized`);
+
+    // Initialize Staff AI system
+    const offset = getMapOffset(this.currentMap);
+    this.staffAI = new StaffAI({
+      scene: this,
+      pathfindingManager: this.pathfindingManager,
+      // Set break room position (default, can be configured per map)
+      breakRoomPosition: this.currentMap.breakRoomPosition
+        ? {
+            x: this.currentMap.breakRoomPosition.x + offset.x,
+            y: this.currentMap.breakRoomPosition.y + offset.y,
+          }
+        : { x: 200 + offset.x, y: 400 + offset.y },
+    });
+    console.log(`✅ Staff AI initialized`);
   }
 
   /**
@@ -274,11 +416,117 @@ export class Game extends Scene {
 
   /**
    * Create beds from config
+   * Beds are defined in MapConfigs.ts for each map
    */
   private createBeds(): void {
-    // Disabled until bed positions are mapped in Tiled
+    const offset = getMapOffset(this.currentMap);
     this.beds.clear();
-    console.log("⚠️ Beds disabled - update BED_POSITIONS to match Tiled map");
+
+    // Check if beds array exists (for backwards compatibility)
+    if (!this.currentMap.beds || this.currentMap.beds.length === 0) {
+      console.log("ℹ️ No beds defined in map config");
+      return;
+    }
+
+    this.currentMap.beds.forEach((bedConfig) => {
+      const bed = new Bed({
+        scene: this,
+        x: bedConfig.x + offset.x,
+        y: bedConfig.y + offset.y,
+        number: bedConfig.number,
+        id: bedConfig.id,
+        direction: bedConfig.direction,
+      });
+
+      this.beds.set(bedConfig.id, bed);
+
+      // Register bed as interactable
+      this.interactionManager.register({
+        id: bedConfig.id,
+        x: bed.x,
+        y: bed.y,
+        type: "bed",
+        promptYOffset: -50,
+        getLabel: () => {
+          // Check if bed has a patient needing treatment
+          const patientInBed = this.getPatientInBed(bedConfig.id);
+          if (patientInBed) {
+            const state = patientInBed.getState();
+            if (state === "IN_BED") {
+              return "Treat";
+            }
+            if (state === "BEING_TREATED") {
+              return `Treating ${Math.round(
+                patientInBed.getTreatmentProgress()
+              )}%`;
+            }
+          }
+          // Check if there's a selected patient to assign
+          if (this.selectedPatientForBed && bed.isAvailable()) {
+            return "Assign";
+          }
+          return bed.getInteractionLabel();
+        },
+        canInteract: () => {
+          // Can interact if bed has patient needing treatment
+          const patientInBed = this.getPatientInBed(bedConfig.id);
+          if (patientInBed) {
+            const state = patientInBed.getState();
+            if (state === "IN_BED" || state === "BEING_TREATED") {
+              return true;
+            }
+          }
+          // Can interact if there's a selected patient to assign
+          if (this.selectedPatientForBed && bed.isAvailable()) {
+            return true;
+          }
+          return bed.canInteract();
+        },
+        onInteract: () => {
+          console.log(`🛏️ Interacting with bed: ${bedConfig.id}`);
+
+          // First priority: treat patient in bed
+          const patientInBed = this.getPatientInBed(bedConfig.id);
+          if (patientInBed) {
+            const state = patientInBed.getState();
+            if (state === "IN_BED") {
+              patientInBed.startTreatment("player");
+              this.currentTreatmentPatient = patientInBed;
+              console.log(
+                `💉 Started treating patient in bed ${bed.getNumber()}`
+              );
+              return;
+            }
+          }
+
+          // Second priority: assign selected patient (from triage)
+          if (this.selectedPatientForBed && bed.isAvailable()) {
+            const patientToAssign = this.selectedPatientForBed;
+            this.selectedPatientForBed = null; // Clear selection after assignment
+            this.assignPatientToBed(patientToAssign, bed);
+            return;
+          }
+
+          if (!bed.getIsWorking()) {
+            // Repair bed
+            bed.repair();
+            EventBus.emit("bed:repaired", { bedId: bedConfig.id });
+          } else if (bed.getNeedsAttention()) {
+            // Attend to patient
+            bed.setNeedsAttention(false);
+            EventBus.emit("bed:attended", { bedId: bedConfig.id });
+          } else {
+            // Check bed status
+            EventBus.emit("bed:interact", {
+              bedId: bedConfig.id,
+              bed: bed.getData(),
+            });
+          }
+        },
+      });
+    });
+
+    console.log(`✅ Created ${this.beds.size} beds`);
   }
 
   /**
@@ -392,6 +640,8 @@ export class Game extends Scene {
         id: staffConfig.id,
         spriteKey: staffConfig.spriteKey,
         name: staffConfig.name,
+        type: staffConfig.type,
+        skill: staffConfig.skill,
       });
 
       // Set spawn position with offset applied
@@ -400,9 +650,15 @@ export class Game extends Scene {
         staffConfig.y + offset.y
       );
 
+      // Set pathfinding manager
+      staff.setPathfindingManager(this.pathfindingManager);
+
+      // Register with Staff AI system
+      this.staffAI.registerStaff(staff);
+
       this.staffs.push(staff);
 
-      // Start auto-task if defined
+      // Start auto-task if defined (legacy behavior)
       if (staffConfig.autoTask) {
         // Apply offset to all walkTo positions in the task
         const taskWithOffset: StaffTask = {
@@ -420,9 +676,68 @@ export class Game extends Scene {
           staff.startTask(taskWithOffset);
         });
       }
+
+      // Register staff for interaction
+      this.registerStaffInteraction(staff);
     });
 
+    // Set beds for Staff AI
+    this.staffAI.setBeds(this.beds);
+
     console.log(`✅ Created ${this.staffs.length} staff members`);
+  }
+
+  /**
+   * Register staff for player interaction
+   */
+  private registerStaffInteraction(staff: Staff): void {
+    this.interactionManager.register({
+      id: staff.getId(),
+      x: staff.x,
+      y: staff.y,
+      type: "staff",
+      promptYOffset: -50,
+      getLabel: () => {
+        const state = staff.getStaffState();
+        const fatigue = staff.getFatigue();
+
+        if (state === "EXHAUSTED" || fatigue >= 60) {
+          return "Encourage";
+        }
+        if (state === "IDLE") {
+          return "Send to Break Room";
+        }
+        if (state === "TREATING") {
+          return `Treating (${Math.round(fatigue)}% fatigue)`;
+        }
+        return staff.getName() || "Staff";
+      },
+      canInteract: () => {
+        const state = staff.getStaffState();
+        // Can interact when idle, exhausted, or treating
+        return (
+          state === "IDLE" || state === "EXHAUSTED" || state === "TREATING"
+        );
+      },
+      onInteract: () => {
+        const state = staff.getStaffState();
+        const fatigue = staff.getFatigue();
+
+        if (state === "EXHAUSTED" || fatigue >= 60) {
+          // Encourage - reduce fatigue
+          this.staffAI.encourageStaff(staff);
+          console.log(`💪 Encouraged ${staff.getName() || staff.getId()}`);
+        } else if (state === "IDLE") {
+          // Send to break room
+          this.staffAI.sendToBreakRoom(staff);
+          console.log(
+            `😴 Sent ${staff.getName() || staff.getId()} to break room`
+          );
+        }
+      },
+      // Dynamic position - follows staff
+      getPosition: () => ({ x: staff.x, y: staff.y }),
+    });
   }
 
   /**
@@ -543,8 +858,17 @@ export class Game extends Scene {
       id: patientId,
     });
 
+    // Set pathfinding manager for collision-aware movement
+    patient.setPathfindingManager(this.pathfindingManager);
+
+    // Set exit point for discharge (same as spawn point)
+    patient.setExitPoint(spawnPoint.x + offset.x, spawnPoint.y + offset.y);
+
     this.patients.push(patient);
     this.patientsArrived++;
+
+    // Register patient as interactable for triage
+    this.registerPatientInteraction(patient, patientId);
 
     // First walk to the waiting area walkToPoint
     const walkTo = gameConfig.patientSpawn.walkToPoint;
@@ -585,6 +909,182 @@ export class Game extends Scene {
   }
 
   /**
+   * Register a patient for triage interaction
+   */
+  private registerPatientInteraction(
+    patient: Patient,
+    patientId: string
+  ): void {
+    this.interactionManager.register({
+      id: patientId,
+      x: patient.x,
+      y: patient.y,
+      type: "patient",
+      promptYOffset: -50,
+      getLabel: () => {
+        const state = patient.getState();
+        if (state === "WAITING") {
+          return "Triage";
+        }
+        return "";
+      },
+      canInteract: () => {
+        const state = patient.getState();
+        return state === "WAITING";
+      },
+      onInteract: () => {
+        const state = patient.getState();
+        if (state === "WAITING") {
+          // Triage the patient
+          patient.triage();
+          console.log(
+            `🏥 Patient ${patientId} triaged (severity: ${patient.getSeverity()})`
+          );
+
+          // Select this patient for bed assignment
+          this.selectedPatientForBed = patient;
+          console.log(`📋 Selected patient ${patientId} for bed assignment`);
+
+          // Show bed assignment UI hint
+          this.showBedAssignmentHint(patient);
+        }
+      },
+      // Dynamic position - follows patient
+      getPosition: () => ({ x: patient.x, y: patient.y }),
+    });
+  }
+
+  /**
+   * Show hint for bed assignment after triage
+   */
+  private showBedAssignmentHint(_patient: Patient): void {
+    // Could show a UI popup here, for now just log
+    console.log(
+      `💡 Press 1-6 to assign patient to a bed, or walk to a bed and press E`
+    );
+  }
+
+  /**
+   * Set up keyboard shortcuts for quick bed assignment (1-6 keys)
+   */
+  private setupBedAssignment(): void {
+    // Keys 1-6 for quick bed assignment
+    for (let i = 1; i <= 6; i++) {
+      const keyName =
+        i === 1
+          ? "ONE"
+          : i === 2
+          ? "TWO"
+          : i === 3
+          ? "THREE"
+          : i === 4
+          ? "FOUR"
+          : i === 5
+          ? "FIVE"
+          : "SIX";
+      this.input.keyboard!.on(`keydown-${keyName}`, () => {
+        this.quickAssignToBed(i);
+      });
+    }
+  }
+
+  /**
+   * Quick assign the selected patient to a bed by number
+   */
+  private quickAssignToBed(bedNumber: number): void {
+    if (!this.selectedPatientForBed) {
+      console.log(`❌ No patient selected for bed assignment`);
+      return;
+    }
+
+    const patient = this.selectedPatientForBed;
+
+    const bed = this.getBedByNumber(bedNumber);
+    if (!bed) {
+      console.log(`❌ Bed ${bedNumber} not found`);
+      return;
+    }
+
+    if (!bed.isAvailable()) {
+      console.log(`❌ Bed ${bedNumber} is not available`);
+      return;
+    }
+
+    // Clear selection after assignment
+    this.selectedPatientForBed = null;
+    this.assignPatientToBed(patient, bed);
+  }
+
+  /**
+   * Get the next triaged patient (highest severity first)
+   */
+  private getNextTriagedPatient(): Patient | null {
+    const triagedPatients = this.patients
+      .filter((p) => p.active && p.getState() === "TRIAGED")
+      .sort((a, b) => b.getSeverity() - a.getSeverity()); // Higher severity first
+
+    return triagedPatients.length > 0 ? triagedPatients[0] : null;
+  }
+
+  /**
+   * Get a bed by its number (1-6)
+   */
+  private getBedByNumber(bedNumber: number): Bed | null {
+    for (const bed of this.beds.values()) {
+      if (bed.getNumber() === bedNumber) {
+        return bed;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get patient in a specific bed
+   */
+  private getPatientInBed(bedId: string): Patient | null {
+    return (
+      this.patients.find(
+        (p) => p.active && p.getData().assignedBedId === bedId
+      ) || null
+    );
+  }
+
+  /**
+   * Assign a patient to a bed
+   */
+  private assignPatientToBed(patient: Patient, bed: Bed): void {
+    // Reserve the bed
+    bed.reserve(patient.getId());
+
+    // Calculate bed position for patient (adjusted based on bed direction)
+    const bedPos = bed.getPatientPosition();
+
+    // Unregister patient interaction since they're being assigned
+    this.interactionManager.unregister(patient.getId());
+
+    // Start patient walking to bed
+    patient.assignToBed(bed.getId(), bedPos.x, bedPos.y);
+
+    console.log(
+      `✅ Patient ${patient.getId()} assigned to bed ${bed.getNumber()}`
+    );
+
+    // When patient arrives, mark bed as occupied
+    // This is handled in Patient.arriveAtBed(), but we also need to update bed state
+    // We'll use a timer to check when patient is in bed
+    const checkInterval = this.time.addEvent({
+      delay: 100,
+      callback: () => {
+        if (patient.getState() === "IN_BED") {
+          bed.occupy(patient.getId());
+          checkInterval.destroy();
+        }
+      },
+      loop: true,
+    });
+  }
+
+  /**
    * Get a random severity based on weights
    */
   private getRandomSeverity(weights: UrgencyWeights): number {
@@ -609,6 +1109,60 @@ export class Game extends Scene {
     if (random < weights.severity4) return 4;
 
     return 5;
+  }
+
+  /**
+   * Setup patient event listeners
+   */
+  private setupPatientEvents(): void {
+    // Release bed when patient dies
+    EventBus.on(
+      EVENTS.PATIENT_DIED,
+      (data: {
+        patientId: string;
+        bedId: string | null;
+        location: { x: number; y: number };
+      }) => {
+        console.log(`💀 Patient ${data.patientId} died`);
+
+        // Release the bed if patient was assigned to one
+        if (data.bedId) {
+          const bed = this.beds.get(data.bedId);
+          if (bed) {
+            bed.release();
+            console.log(
+              `🛏️ Bed ${bed.getNumber()} released after patient death`
+            );
+          }
+        }
+
+        // Record the death in stats
+        this.recordPatientDeath();
+      }
+    );
+
+    // Release bed when patient is stabilized (treatment complete)
+    EventBus.on(EVENTS.PATIENT_STABILIZED, (data: { patientId: string }) => {
+      console.log(`✅ Patient ${data.patientId} stabilized`);
+
+      // Find patient and release their bed
+      const patient = this.patients.find((p) => p.getId() === data.patientId);
+      if (patient) {
+        const bedId = patient.getData().assignedBedId;
+        if (bedId) {
+          const bed = this.beds.get(bedId);
+          if (bed) {
+            bed.release();
+            console.log(
+              `🛏️ Bed ${bed.getNumber()} released - patient stabilized and leaving`
+            );
+          }
+        }
+      }
+
+      // Record successful treatment
+      this.patientsSaved++;
+    });
   }
 
   /**
@@ -766,13 +1320,19 @@ export class Game extends Scene {
     this.chaosText.setText(`${Math.round(this.chaosScore)}%`);
     this.updateChaosBar();
 
+    // Count waiting patients (WAITING or TRIAGED states)
+    const waitingCount = this.patients.filter(
+      (p) =>
+        p.active && (p.getState() === "WAITING" || p.getState() === "TRIAGED")
+    ).length;
+
     // Update stats
     const occupiedBeds = Array.from(this.beds.values()).filter(
-      (b) => b.getState() === "OCCUPIED"
+      (b) => b.getState() === "OCCUPIED" || b.getState() === "RESERVED"
     ).length;
     const totalBeds = this.beds.size || 0;
     this.statsText.setText(
-      `👥 Waiting: 0  |  🛏️ Beds: ${occupiedBeds}/${totalBeds}  |  💀 Deaths: ${this.patientsDied}  |  ✅ Saved: ${this.patientsSaved}`
+      `👥 Waiting: ${waitingCount}  |  🛏️ Beds: ${occupiedBeds}/${totalBeds}  |  💀 Deaths: ${this.patientsDied}  |  ✅ Saved: ${this.patientsSaved}`
     );
   }
 
@@ -964,6 +1524,7 @@ export class Game extends Scene {
     this.imageMapLoader?.destroy();
     this.collisionManager?.destroy();
     this.interactionManager?.destroy();
+    this.pathfindingManager?.destroy();
     this.beds.clear();
   }
 }
